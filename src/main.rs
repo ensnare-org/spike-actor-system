@@ -86,17 +86,25 @@
 //!     effects, etc.
 //! 11. If the master track is done, broadcast its buffer.
 
+use always::AlwaysSame;
 use anyhow::anyhow;
+use busy::BusyWaiter;
 use crossbeam_channel::{Receiver, Select, Sender};
 use crossbeam_queue::ArrayQueue;
 use delegate::delegate;
-use eframe::egui::{ahash::HashMap, CentralPanel};
+use eframe::egui::{ahash::HashMap, CentralPanel, Color32, Frame, Margin, Stroke};
 use ensnare::{orchestration::TrackUidFactory, prelude::*, traits::MidiNoteLabelMetadata};
 use ensnare_toys::{ToyInstrument, ToySynth};
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex, RwLock,
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex, RwLock,
+    },
+    time::Duration,
 };
+
+mod always;
+mod busy;
 
 const ATOMIC_ORDERING: Ordering = Ordering::Relaxed;
 
@@ -121,6 +129,7 @@ struct EntityActor {
     input_channel_pair: ChannelPair<Input>,
     sender: Sender<Input>,
     entity: Arc<Mutex<dyn EntityBounds>>,
+    is_emitting_sound: Arc<AtomicBool>,
 }
 impl EntityActor {
     fn new_with(entity: impl EntityBounds + 'static, sender: &Sender<Input>) -> Self {
@@ -132,6 +141,7 @@ impl EntityActor {
             input_channel_pair: Default::default(),
             sender: sender.clone(),
             entity,
+            is_emitting_sound: Default::default(),
         };
         r.start_input_thread();
         r
@@ -142,6 +152,7 @@ impl EntityActor {
         let sender = self.sender.clone();
         let entity = Arc::clone(&self.entity);
         let mut buffer = GenerationBuffer::<StereoSample>::default();
+        let is_emitting_sound = Arc::clone(&self.is_emitting_sound);
 
         std::thread::spawn(move || {
             while let Ok(input) = receiver.recv() {
@@ -165,6 +176,11 @@ impl EntityActor {
                         buffer.resize(count);
                         buffer.clear();
                         entity.lock().unwrap().generate(buffer.buffer_mut());
+
+                        is_emitting_sound.store(
+                            buffer.buffer().iter().any(|&s| s != StereoSample::SILENCE),
+                            ATOMIC_ORDERING,
+                        );
                         let _ = sender.try_send(Input::Frames(buffer.buffer().to_vec()));
                     }
                     Input::Frames(count) => {
@@ -185,7 +201,18 @@ impl EntityActor {
 }
 impl Displays for EntityActor {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
-        self.entity.lock().unwrap().ui(ui)
+        Frame::default()
+            .stroke(if self.is_emitting_sound.load(ATOMIC_ORDERING) {
+                Stroke::new(2.0, Color32::YELLOW)
+            } else {
+                Stroke::default()
+            })
+            .inner_margin(Margin::same(4.0))
+            .show(ui, |ui| {
+                let mut entity = self.entity.lock().unwrap();
+                entity.ui(ui)
+            })
+            .inner
     }
 
     fn set_action(&mut self, action: DisplaysAction) {}
@@ -291,11 +318,16 @@ struct Track {
 }
 impl Track {
     fn new_with(uid: TrackUid, sender: &Sender<Input>) -> Self {
-        Self {
+        let mut r = Self {
             uid,
             sender: sender.clone(),
             actors: Default::default(),
-        }
+        };
+
+        // r.add_actor(AlwaysSame::new_with(1.0));
+        // r.add_actor(AlwaysSame::new_with(-1.0));
+
+        r
     }
 
     fn add_actor(&mut self, entity: impl EntityBounds + 'static) {
@@ -307,14 +339,35 @@ impl Track {
 impl Displays for Track {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
         ui.horizontal_top(|ui| {
-            for actor in self.actors.iter_mut() {
-                actor.ui(ui);
-            }
             if ui.button("Add Synth").clicked() {
                 self.add_actor(ToySynth::default());
             }
             if ui.button("Add ToyInstrument").clicked() {
                 self.add_actor(ToyInstrument::default());
+            }
+            if ui.button("Add Busy Waiter").clicked() {
+                self.add_actor(BusyWaiter::default());
+            }
+            if ui.button("Add 1.0").clicked() {
+                self.add_actor(AlwaysSame::new_with(1.0));
+            }
+            if ui.button("Add 0.5").clicked() {
+                self.add_actor(AlwaysSame::new_with(0.5));
+            }
+            if ui.button("Add -1.0").clicked() {
+                self.add_actor(AlwaysSame::new_with(-1.0));
+            }
+            let mut actor_to_remove = None;
+            for (i, actor) in self.actors.iter_mut().enumerate() {
+                ui.vertical(|ui| {
+                    actor.ui(ui);
+                    if ui.button("Remove").clicked() {
+                        actor_to_remove = Some(i);
+                    }
+                });
+            }
+            if let Some(actor_to_remove) = actor_to_remove {
+                self.actors.remove(actor_to_remove);
             }
         });
         ui.label("Coming soon!")
@@ -558,13 +611,26 @@ impl EngineService {
 
         let o_sender = o.lock().unwrap().input_channel_pair.sender.clone();
 
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create("/home/miket/out.wav", spec).unwrap();
+
         let mut frames_requested = 0;
 
         std::thread::spawn(move || loop {
             if let Ok(input) = receiver.recv() {
                 let mut start_generation = false;
                 match input {
-                    EngineServiceInput::Quit => break,
+                    EngineServiceInput::Quit => {
+                        println!("finalizing");
+                        let _ = writer.finalize();
+                        println!("finalized");
+                        break;
+                    }
                     EngineServiceInput::NeedsAudio(count) => {
                         if frames_requested == 0 {
                             start_generation = true;
@@ -575,17 +641,11 @@ impl EngineService {
                         let frames_len = frames.len();
 
                         if let Some(queue) = audio_queue.as_ref() {
-                            for (i, &frame) in frames.iter().enumerate() {
-                                // assert_eq!(
-                                //     frame,
-                                //     StereoSample::from(i as f64 / 64.0),
-                                //     "failed at frame #{}",
-                                //     frame_counter
-                                // );
-                                // counter += 1;
-                                // if counter == 100 {
-                                //     counter = 0;
-                                // }
+                            for &frame in frames.iter() {
+                                //                                let (left, right) = frame.clone().into_i16();
+                                let _ = writer.write_sample(frame.0 .0 as f32);
+                                let _ = writer.write_sample(frame.1 .0 as f32);
+
                                 let push_result = queue.force_push(frame);
                                 assert!(
                                     push_result.is_none(),
@@ -643,6 +703,7 @@ impl eframe::App for ActorSystemApp {
         CentralPanel::default().show(ctx, |ui| {
             self.orchestratress.lock().unwrap().ui(ui);
         });
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
 }
 impl ActorSystemApp {

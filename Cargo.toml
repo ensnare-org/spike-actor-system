@@ -11,7 +11,10 @@ delegate = "0.12.0"
 derivative = "2.2.0"
 eframe = "0.27.2"
 ensnare = { path = "../../../src/ensnare" }
+ensnare-proc-macros = { path = "../../../src/ensnare/proc-macros" }
 ensnare-toys = { path = "../../../src/ensnare/toys" }
 env_logger = "0.11.3"
+hound = "3.5.1"
 rustc-hash = "1.1.0"
 serde = { version = "1.0.198", features = ["rc", "derive"] }
+typetag = "0.2.16"
