@@ -1,0 +1,17 @@
+[package]
+name = "spike-actor-system"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.82"
+crossbeam-channel = "0.5.12"
+crossbeam-queue = "0.3.11"
+delegate = "0.12.0"
+derivative = "2.2.0"
+eframe = "0.27.2"
+ensnare = { path = "../../../src/ensnare" }
+ensnare-toys = { path = "../../../src/ensnare/toys" }
+env_logger = "0.11.3"
+rustc-hash = "1.1.0"
+serde = { version = "1.0.198", features = ["rc", "derive"] }
