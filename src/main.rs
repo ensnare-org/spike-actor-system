@@ -209,30 +209,6 @@ impl TrackActor {
         let input_channel_pair = ChannelPair::<Input>::default();
         let track = Track::new_with(track_uid, &input_channel_pair.sender);
 
-        // track.add_actor();
-
-        // let mut instrument_2 = ToyInstrument::default();
-        // instrument_2.handle_midi_message(
-        //     MidiChannel::default(),
-        //     MidiUtils::new_note_on(64, 127),
-        //     &mut |c, m| {},
-        // );
-        // track.actors.push(EntityActor::new_with(
-        //     instrument_2,
-        //     &input_channel_pair.sender,
-        // ));
-
-        // let mut instrument_3 = ToyInstrument::default();
-        // instrument_3.handle_midi_message(
-        //     MidiChannel::default(),
-        //     MidiUtils::new_note_on(67, 127),
-        //     &mut |c, m| {},
-        // );
-        // track.actors.push(EntityActor::new_with(
-        //     instrument_3,
-        //     &input_channel_pair.sender,
-        // ));
-
         let mut r = Self {
             input_channel_pair,
             sender: sender.clone(),
@@ -322,9 +298,9 @@ impl Track {
         }
     }
 
-    fn add_actor(&mut self) {
+    fn add_actor(&mut self, entity: impl EntityBounds + 'static) {
         self.actors
-            .push(EntityActor::new_with(ToySynth::default(), &self.sender));
+            .push(EntityActor::new_with(entity, &self.sender));
     }
 }
 
@@ -334,8 +310,11 @@ impl Displays for Track {
             for actor in self.actors.iter_mut() {
                 actor.ui(ui);
             }
-            if ui.button("Add").clicked() {
-                self.add_actor();
+            if ui.button("Add Synth").clicked() {
+                self.add_actor(ToySynth::default());
+            }
+            if ui.button("Add ToyInstrument").clicked() {
+                self.add_actor(ToyInstrument::default());
             }
         });
         ui.label("Coming soon!")
