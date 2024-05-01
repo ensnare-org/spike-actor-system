@@ -93,9 +93,12 @@ use crossbeam_channel::{Receiver, Select, Sender};
 use crossbeam_queue::ArrayQueue;
 use delegate::delegate;
 use eframe::egui::{ahash::HashMap, CentralPanel, Color32, Frame, Margin, Stroke};
-use ensnare::{orchestration::TrackUidFactory, prelude::*, traits::MidiNoteLabelMetadata};
+use ensnare::{
+    orchestration::TrackUidFactory, prelude::*, traits::MidiNoteLabelMetadata, types::AudioQueue,
+};
 use ensnare_toys::{ToyInstrument, ToySynth};
 use std::{
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
@@ -108,6 +111,7 @@ mod busy;
 
 const ATOMIC_ORDERING: Ordering = Ordering::Relaxed;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum Input {
     Midi(MidiChannel, MidiMessage),
@@ -117,6 +121,7 @@ enum Input {
     Quit,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum Event {
     Midi(MidiChannel, MidiMessage),
@@ -183,7 +188,7 @@ impl EntityActor {
                         );
                         let _ = sender.try_send(Input::Frames(buffer.buffer().to_vec()));
                     }
-                    Input::Frames(count) => {
+                    Input::Frames(_) => {
                         panic!("I generate audio; I don't aggregate it")
                     }
                     Input::Quit => {
@@ -214,14 +219,6 @@ impl Displays for EntityActor {
             })
             .inner
     }
-
-    fn set_action(&mut self, action: DisplaysAction) {}
-
-    fn take_action(&mut self) -> Option<DisplaysAction> {
-        None
-    }
-
-    fn set_view_range(&mut self, view_range: &ViewRange) {}
 }
 
 #[derive(Debug)]
@@ -312,22 +309,18 @@ impl TrackActor {
 
 #[derive(Debug)]
 struct Track {
+    #[allow(dead_code)]
     uid: TrackUid,
     sender: Sender<Input>,
     actors: Vec<EntityActor>,
 }
 impl Track {
     fn new_with(uid: TrackUid, sender: &Sender<Input>) -> Self {
-        let mut r = Self {
+        Self {
             uid,
             sender: sender.clone(),
             actors: Default::default(),
-        };
-
-        // r.add_actor(AlwaysSame::new_with(1.0));
-        // r.add_actor(AlwaysSame::new_with(-1.0));
-
-        r
+        }
     }
 
     fn add_actor(&mut self, entity: impl EntityBounds + 'static) {
@@ -372,14 +365,6 @@ impl Displays for Track {
         });
         ui.label("Coming soon!")
     }
-
-    fn set_action(&mut self, action: DisplaysAction) {}
-
-    fn take_action(&mut self) -> Option<DisplaysAction> {
-        None
-    }
-
-    fn set_view_range(&mut self, view_range: &ViewRange) {}
 }
 
 #[derive(Debug)]
@@ -479,7 +464,7 @@ impl Orchestratress {
                         }
                     }
                     Input::Quit => todo!(),
-                    Input::NeedsAudio(count) => {
+                    Input::NeedsAudio(_) => {
                         panic!("this is only downstream from parent, not upstream from children")
                     }
                 }
@@ -550,7 +535,7 @@ impl Displays for Orchestratress {
         }
         ui.separator();
         if ui.button("Add track").clicked() {
-            self.create_track();
+            let _ = self.create_track();
         }
 
         ui.separator();
@@ -558,27 +543,119 @@ impl Displays for Orchestratress {
         ui.separator();
         ui.label("Coming soon!")
     }
+}
 
-    fn set_action(&mut self, action: DisplaysAction) {}
+#[derive(Debug)]
+enum WavWriterInput {
+    Reset(PathBuf, SampleRate, u16),
+    Frames(Vec<StereoSample>),
+    Quit,
+}
 
-    fn take_action(&mut self) -> Option<DisplaysAction> {
-        None
+#[allow(dead_code)]
+#[derive(Debug)]
+enum WavWriterEvent {
+    Err(anyhow::Error),
+}
+
+#[derive(Debug)]
+struct WavWriterService {
+    input_channel_pair: ChannelPair<WavWriterInput>,
+    event_channel_pair: ChannelPair<WavWriterEvent>,
+}
+impl Default for WavWriterService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl WavWriterService {
+    pub fn new() -> Self {
+        let r = Self {
+            input_channel_pair: Default::default(),
+            event_channel_pair: Default::default(),
+        };
+
+        r.start_thread();
+        r
     }
 
-    fn set_view_range(&mut self, view_range: &ViewRange) {}
+    pub fn send_input(&self, input: WavWriterInput) {
+        let _ = self.input_channel_pair.sender.try_send(input);
+    }
+
+    fn start_thread(&self) {
+        let receiver = self.input_channel_pair.receiver.clone();
+        let sender = self.event_channel_pair.sender.clone();
+        let mut writer = None;
+
+        // Nice touch: don't write to the file until our first non-silent sample.
+        let mut has_lead_in_ended = false;
+
+        std::thread::spawn(move || {
+            while let Ok(input) = receiver.recv() {
+                match input {
+                    WavWriterInput::Reset(path_buf, new_sample_rate, new_channel_count) => {
+                        has_lead_in_ended = false;
+                        match hound::WavWriter::create(
+                            path_buf.as_os_str(),
+                            hound::WavSpec {
+                                channels: new_channel_count,
+                                sample_rate: new_sample_rate.0 as u32,
+                                bits_per_sample: 32,
+                                sample_format: hound::SampleFormat::Float,
+                            },
+                        ) {
+                            Ok(ww) => {
+                                writer = Some(ww);
+                            }
+                            Err(e) => {
+                                writer = None;
+                                let _ = sender.try_send(WavWriterEvent::Err(anyhow!(
+                                    "Error while creating file: {:?}",
+                                    e
+                                )));
+                            }
+                        }
+                    }
+                    WavWriterInput::Frames(frames) => {
+                        if let Some(writer) = writer.as_mut() {
+                            frames.iter().for_each(|&f| {
+                                if !has_lead_in_ended {
+                                    if f != StereoSample::SILENCE {
+                                        has_lead_in_ended = true;
+                                    }
+                                }
+                                if has_lead_in_ended {
+                                    let _ = writer.write_sample(f.0 .0 as f32);
+                                    let _ = writer.write_sample(f.1 .0 as f32);
+                                }
+                            })
+                        }
+                    }
+                    WavWriterInput::Quit => {
+                        if let Some(writer) = writer {
+                            let _ = writer.finalize();
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+    }
 }
 
 #[derive(Debug)]
 enum EngineServiceInput {
-    Quit,
-    Reset(SampleRate, u16, Arc<ArrayQueue<StereoSample>>),
+    Reset(SampleRate, u16, AudioQueue),
+    Midi(MidiChannel, MidiMessage),
     NeedsAudio(usize),
     Frames(Vec<StereoSample>),
+    Quit,
 }
 
 #[derive(Debug)]
 enum EngineServiceEvent {
-    Quit,
+    NewOrchestratress(Arc<Mutex<Orchestratress>>),
 }
 
 #[derive(Debug)]
@@ -588,15 +665,20 @@ struct EngineService {
 
     orchestratress: Arc<Mutex<Orchestratress>>,
 }
+impl Default for EngineService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl EngineService {
-    fn new_with(
-        orchestratress: &Arc<Mutex<Orchestratress>>,
-        input_channel_pair: ChannelPair<EngineServiceInput>,
-    ) -> Self {
+    fn new() -> Self {
+        let input_channel_pair: ChannelPair<EngineServiceInput> = Default::default();
         let r = Self {
+            orchestratress: Arc::new(Mutex::new(Orchestratress::new_with_sender(
+                &input_channel_pair.sender,
+            ))),
             input_channel_pair,
             event_channel_pair: Default::default(),
-            orchestratress: Arc::clone(&orchestratress),
         };
 
         r.start_thread();
@@ -606,18 +688,16 @@ impl EngineService {
 
     fn start_thread(&self) {
         let o = Arc::clone(&self.orchestratress);
+        let _ = self
+            .event_channel_pair
+            .sender
+            .try_send(EngineServiceEvent::NewOrchestratress(Arc::clone(
+                &self.orchestratress,
+            )));
         let receiver = self.input_channel_pair.receiver.clone();
         let mut audio_queue: Option<Arc<ArrayQueue<StereoSample>>> = None;
 
-        let o_sender = o.lock().unwrap().input_channel_pair.sender.clone();
-
-        let spec = hound::WavSpec {
-            channels: 2,
-            sample_rate: 44100,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let mut writer = hound::WavWriter::create("/home/miket/out.wav", spec).unwrap();
+        let writer_service = WavWriterService::new();
 
         let mut frames_requested = 0;
 
@@ -626,9 +706,7 @@ impl EngineService {
                 let mut start_generation = false;
                 match input {
                     EngineServiceInput::Quit => {
-                        println!("finalizing");
-                        let _ = writer.finalize();
-                        println!("finalized");
+                        writer_service.send_input(WavWriterInput::Quit);
                         break;
                     }
                     EngineServiceInput::NeedsAudio(count) => {
@@ -642,10 +720,6 @@ impl EngineService {
 
                         if let Some(queue) = audio_queue.as_ref() {
                             for &frame in frames.iter() {
-                                //                                let (left, right) = frame.clone().into_i16();
-                                let _ = writer.write_sample(frame.0 .0 as f32);
-                                let _ = writer.write_sample(frame.1 .0 as f32);
-
                                 let push_result = queue.force_push(frame);
                                 assert!(
                                     push_result.is_none(),
@@ -656,6 +730,7 @@ impl EngineService {
                                 );
                             }
                         }
+                        writer_service.send_input(WavWriterInput::Frames(frames));
 
                         assert!(frames_len <= 64);
                         if frames_requested > frames_len {
@@ -672,10 +747,22 @@ impl EngineService {
                             frames_requested = 0;
                         }
                     }
-                    EngineServiceInput::Reset(sample_rate, _channels, new_audio_queue) => {
+                    EngineServiceInput::Reset(sample_rate, channel_count, new_audio_queue) => {
                         audio_queue = Some(new_audio_queue);
                         o.lock().unwrap().update_sample_rate(sample_rate);
+                        writer_service.send_input(WavWriterInput::Reset(
+                            PathBuf::from(format!(
+                                "/home/miket/out-{}-{}.wav",
+                                sample_rate.0, channel_count
+                            )),
+                            sample_rate,
+                            channel_count,
+                        ));
                     }
+                    EngineServiceInput::Midi(channel, message) => o
+                        .lock()
+                        .unwrap()
+                        .handle_midi_message(channel, message, &mut |_, _| panic!()),
                 }
 
                 if start_generation {
@@ -695,52 +782,65 @@ impl EngineService {
 }
 
 #[derive(Debug)]
-struct ActorSystemApp {
-    orchestratress: Arc<Mutex<Orchestratress>>,
+enum ServiceInput {
+    Quit,
 }
-impl eframe::App for ActorSystemApp {
-    fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
-        CentralPanel::default().show(ctx, |ui| {
-            self.orchestratress.lock().unwrap().ui(ui);
-        });
-        ctx.request_repaint_after(Duration::from_millis(100));
-    }
-}
-impl ActorSystemApp {
-    pub const NAME: &'static str = "ActorSystemApp";
 
+#[derive(Debug)]
+enum ServiceEvent {
+    NewOrchestratress(Arc<Mutex<Orchestratress>>),
+}
+
+/// Manages all the services that the app uses.
+#[derive(Debug)]
+struct ServiceManager {
+    input_channel_pair: ChannelPair<ServiceInput>,
+    event_channel_pair: ChannelPair<ServiceEvent>,
+
+    #[allow(dead_code)]
+    midi_service: MidiService,
+    #[allow(dead_code)]
+    engine_service: EngineService,
+}
+impl ServiceManager {
     pub fn new() -> Self {
-        let engine_input_channel_pair = ChannelPair::<EngineServiceInput>::default();
         let r = Self {
-            orchestratress: Arc::new(Mutex::new(Orchestratress::new_with_sender(
-                &engine_input_channel_pair.sender,
-            ))),
+            midi_service: MidiService::new_with(&Arc::new(RwLock::new(MidiSettings::default()))),
+            engine_service: EngineService::default(),
+            input_channel_pair: Default::default(),
+            event_channel_pair: Default::default(),
         };
-
-        r.start_thread(engine_input_channel_pair);
-
+        r.start_thread();
         r
     }
 
-    fn start_thread(&self, engine_input_channel_pair: ChannelPair<EngineServiceInput>) {
-        let o = Arc::clone(&self.orchestratress);
+    fn start_thread(&self) {
+        let midi_receiver = self.midi_service.receiver().clone();
+        let midi_sender = self.midi_service.sender().clone();
+
+        let engine_receiver = self.engine_service.receiver().clone();
+        let engine_sender = self.engine_service.sender().clone();
+
+        // This one is backwards (receiver of input, sender of event) because it
+        // is the set of channels that others use to talk with the service
+        // manager, rather than being channels that the service manager uses to
+        // aggregate other services.
+        let sm_receiver = self.input_channel_pair.receiver.clone();
+        let sm_sender = self.event_channel_pair.sender.clone();
 
         std::thread::spawn(move || {
             let mut sel = Select::new();
 
+            // AudioService is special because it isn't Send, so we have to
+            // create it on the same thread that we use to communicate with it.
+            // See https://github.com/RustAudio/cpal/issues/818.
             let audio_service = AudioService::default();
             let audio_receiver = audio_service.receiver().clone();
+            let audio_sender = audio_service.sender().clone();
             let audio_index = sel.recv(&audio_receiver);
 
-            let midi_settings = Arc::new(RwLock::new(MidiSettings::default()));
-            let midi_service = MidiService::new_with(&midi_settings);
-            let midi_receiver = midi_service.receiver().clone();
+            let ui_index = sel.recv(&sm_receiver);
             let midi_index = sel.recv(&midi_receiver);
-            let midi_sender = midi_service.sender().clone();
-
-            let engine_service = EngineService::new_with(&o, engine_input_channel_pair);
-            let engine_receiver = engine_service.receiver().clone();
-            let engine_sender = engine_service.sender().clone();
             let engine_index = sel.recv(&engine_receiver);
 
             loop {
@@ -754,19 +854,15 @@ impl ActorSystemApp {
                                     new_channels,
                                     new_audio_queue,
                                 ) => {
-                                    // for _ in 0..new_sample_rate.0 {
-                                    //     let _ = new_audio_queue.push(StereoSample::default());
-                                    // }
-                                    let _ = engine_sender.send(EngineServiceInput::Reset(
+                                    let _ = engine_sender.try_send(EngineServiceInput::Reset(
                                         new_sample_rate,
                                         new_channels,
                                         new_audio_queue,
                                     ));
                                 }
                                 AudioServiceEvent::NeedsAudio(count) => {
-                                    println!("NeedsAudio({count})");
-                                    let _ =
-                                        engine_sender.send(EngineServiceInput::NeedsAudio(count));
+                                    let _ = engine_sender
+                                        .try_send(EngineServiceInput::NeedsAudio(count));
                                 }
                                 AudioServiceEvent::Underrun => println!("FYI underrun"),
                             }
@@ -777,17 +873,22 @@ impl ActorSystemApp {
                             println!("{event:?}");
                             match event {
                                 MidiServiceEvent::Midi(channel, message) => {
-                                    o.lock().unwrap().handle_midi_message(channel, message, &mut |c, m| {
-                                        panic!("If this gets called, it means that Orchestratress wanted to broadcast a MIDI message by callback, but it should be using the channel");
-                                    })
+                                    let _ = engine_sender
+                                        .try_send(EngineServiceInput::Midi(channel, message));
                                 }
                                 MidiServiceEvent::MidiOut => todo!("blink the activity indicator"),
-                                MidiServiceEvent::InputPortsRefreshed(ports) => {eprintln!("inputs: {ports:?}"); 
-                                let _ = midi_sender.send(MidiInterfaceServiceInput::SelectMidiInput(ports[1].clone()));
-                            },
-                                MidiServiceEvent::OutputPortsRefreshed(ports) => {eprintln!("outputs: {ports:?}");
-                                // let _ = midi_sender.send(MidiInterfaceServiceInput::SelectMidiOutput(ports[2].clone()));
-                                },
+                                MidiServiceEvent::InputPortsRefreshed(ports) => {
+                                    eprintln!("inputs: {ports:?}");
+                                    let _ = midi_sender.try_send(
+                                        MidiInterfaceServiceInput::SelectMidiInput(
+                                            ports[1].clone(),
+                                        ),
+                                    );
+                                }
+                                MidiServiceEvent::OutputPortsRefreshed(ports) => {
+                                    eprintln!("outputs: {ports:?}");
+                                    // let _ = midi_sender.send(MidiInterfaceServiceInput::SelectMidiOutput(ports[2].clone()));
+                                }
                             }
                         }
                     }
@@ -795,14 +896,77 @@ impl ActorSystemApp {
                         if let Ok(event) = operation.recv(&engine_receiver) {
                             println!("{event:?}");
                             match event {
-                                EngineServiceEvent::Quit => todo!(),
+                                EngineServiceEvent::NewOrchestratress(new_o) => {
+                                    let _ =
+                                        sm_sender.try_send(ServiceEvent::NewOrchestratress(new_o));
+                                }
                             }
+                        }
+                    }
+                    index if index == ui_index => {
+                        if let Ok(input) = operation.recv(&sm_receiver) {
+                            println!("{input:?}");
+                            match input {
+                                ServiceInput::Quit => {
+                                    let _ = audio_sender.try_send(AudioServiceInput::Quit);
+                                    let _ = midi_sender.try_send(MidiInterfaceServiceInput::Quit);
+                                    let _ = engine_sender.try_send(EngineServiceInput::Quit);
+                                }
+                            }
+                            break;
                         }
                     }
                     _ => panic!(),
                 }
             }
         });
+    }
+
+    fn receiver(&self) -> &Receiver<ServiceEvent> {
+        &self.event_channel_pair.receiver
+    }
+
+    fn sender(&self) -> &Sender<ServiceInput> {
+        &self.input_channel_pair.sender
+    }
+}
+
+#[derive(Debug)]
+struct ActorSystemApp {
+    service_manager: ServiceManager,
+    orchestratress: Option<Arc<Mutex<Orchestratress>>>,
+}
+impl eframe::App for ActorSystemApp {
+    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        loop {
+            if let Ok(event) = self.service_manager.receiver().try_recv() {
+                match event {
+                    ServiceEvent::NewOrchestratress(new_o) => self.orchestratress = Some(new_o),
+                }
+            } else {
+                break;
+            }
+        }
+        CentralPanel::default().show(ctx, |ui| {
+            if let Some(orchestratress) = self.orchestratress.as_ref() {
+                orchestratress.lock().unwrap().ui(ui);
+            }
+        });
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let _ = self.service_manager.sender().try_send(ServiceInput::Quit);
+    }
+}
+impl ActorSystemApp {
+    pub const NAME: &'static str = "ActorSystemApp";
+
+    pub fn new() -> Self {
+        Self {
+            service_manager: ServiceManager::new(),
+            orchestratress: None,
+        }
     }
 }
 
