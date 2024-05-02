@@ -95,12 +95,11 @@
 //! - Request: A message sent from an actor's owner to ask the actor to do something.
 //! - Action: A message sent by an actor to inform its owner of completed work.
 
-use crate::orchestration::EngineServiceEvent;
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Select, Sender};
 use eframe::egui::CentralPanel;
+use engine::{Engine, EngineService, EngineServiceEvent, EngineServiceInput};
 use ensnare::prelude::*;
-use orchestration::{Engine, EngineService, EngineServiceInput};
 use std::{
     sync::{atomic::Ordering, Arc, Mutex, RwLock},
     time::Duration,
@@ -110,8 +109,9 @@ use traits::ProvidesService;
 mod always;
 mod arp;
 mod busy;
+mod engine;
 mod entity;
-mod orchestration;
+mod inverts;
 mod track;
 mod traits;
 mod wav_writer;
@@ -134,8 +134,10 @@ struct ServiceManager {
     input_channel_pair: ChannelPair<ServiceInput>,
     event_channel_pair: ChannelPair<ServiceEvent>,
 
+    // reason = "We need to keep a reference to the service or else it'll be dropped"
     #[allow(dead_code)]
     midi_service: MidiService,
+    // reason = "We need to keep a reference to the service or else it'll be dropped"
     #[allow(dead_code)]
     engine_service: EngineService,
 }
@@ -215,7 +217,7 @@ impl ServiceManager {
                                 }
                                 MidiServiceEvent::MidiOut => {
                                     // TODO: blink activity.... (or get rid of this, because we sent it so we already know about it....)
-                                },
+                                }
                                 MidiServiceEvent::InputPortsRefreshed(ports) => {
                                     eprintln!("inputs: {ports:?}");
                                     let _ = midi_sender.try_send(
