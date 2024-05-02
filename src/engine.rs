@@ -6,11 +6,12 @@ use crate::{
 use crossbeam_channel::{Select, Sender};
 use crossbeam_queue::ArrayQueue;
 use delegate::delegate;
-use eframe::egui::ahash::HashMap;
+use eframe::egui::Button;
 use ensnare::{
     orchestration::TrackUidFactory, prelude::*, traits::MidiNoteLabelMetadata, types::AudioQueue,
 };
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -207,6 +208,29 @@ impl EngineService {
 }
 
 #[derive(Debug)]
+struct TrackActorInfo {
+    pub uid: TrackUid,
+    pub sender: Sender<TrackRequest>,
+    pub action_sender: Sender<TrackAction>,
+}
+impl TrackActorInfo {
+    fn is_default(&self) -> bool {
+        self.uid == TrackUid(0)
+    }
+}
+impl Default for TrackActorInfo {
+    fn default() -> Self {
+        let dummy_request_channel = ChannelPair::<TrackRequest>::default();
+        let dummy_action_channel = ChannelPair::<TrackAction>::default();
+        Self {
+            uid: TrackUid(0), // Hack: this is an invalid uid
+            sender: dummy_request_channel.sender.clone(),
+            action_sender: dummy_action_channel.sender.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Engine {
     action_sender: Sender<TrackAction>,
     c: Configurables,
@@ -215,9 +239,8 @@ pub struct Engine {
     ordered_track_uids: Vec<TrackUid>,
     tracks: HashMap<TrackUid, TrackActor>,
     track_uid_factory: Arc<TrackUidFactory>,
-    master_track_uid: TrackUid,
 
-    track_pending_count: usize,
+    master_track_info: TrackActorInfo,
 
     transport: Transport,
     uid_factory: Arc<EntityUidFactory>,
@@ -272,34 +295,28 @@ impl Controls for Engine {
 }
 impl Engine {
     pub fn new_with_sender(action_sender: &Sender<TrackAction>) -> Self {
-        let track_uid_factory: Arc<TrackUidFactory> = Default::default();
-        let master_track_uid = track_uid_factory.mint_next();
-
         let mut r = Self {
             action_sender: action_sender.clone(),
             c: Default::default(),
             buffer: Default::default(),
             ordered_track_uids: Default::default(),
             tracks: Default::default(),
-            track_uid_factory,
-            master_track_uid,
-            track_pending_count: Default::default(),
+            track_uid_factory: Default::default(),
+            master_track_info: Default::default(),
             transport: Default::default(),
             uid_factory: Default::default(),
         };
-
-        r.create_track_with_uid(r.master_track_uid).unwrap();
+        let _ = r.create_track();
         r
     }
 
     fn handle_frames(&mut self, frames: &[StereoSample]) -> bool {
         self.buffer.merge(&frames);
 
-        // Are we on the last track?
-        self.track_pending_count -= 1;
-        let complete = self.track_pending_count == 0;
-
-        complete
+        // We're complete because the engine has only a single source (the
+        // master track), so if we got frames to handle, then that's all we're
+        // going to get.
+        true
     }
 
     pub fn start_generation(&mut self, count: usize) {
@@ -312,12 +329,6 @@ impl Engine {
                 .action_sender
                 .send(TrackAction::Frames(self.buffer.buffer().to_vec()));
         } else {
-            assert_eq!(
-                self.track_pending_count, 0,
-                "we shouldn't start generation while another is pending"
-            );
-            self.track_pending_count += self.ordered_track_uids.len();
-
             // Figure out the time slice for this batch of frames.
             let time_range = self.transport.advance(count);
 
@@ -328,27 +339,57 @@ impl Engine {
                 }
             }
 
-            // Ask tracks to do their frame-based work.
-            for track_uid in self.ordered_track_uids.iter() {
-                if let Some(track) = self.tracks.get(track_uid) {
-                    track.send_request(TrackRequest::NeedsAudio(count));
-                }
-            }
+            // Ask master track for next buffer of frames.
+            let _ = self
+                .master_track_info
+                .sender
+                .send(TrackRequest::NeedsAudio(count));
         }
     }
 
-    fn create_track_with_uid(&mut self, track_uid: TrackUid) -> anyhow::Result<TrackUid> {
-        let track_actor = TrackActor::new_with(track_uid, &self.action_sender, &self.uid_factory);
+    fn create_track(&mut self) -> anyhow::Result<TrackUid> {
+        let track_uid = self.track_uid_factory.mint_next();
+        let create_master_track = self.master_track_info.is_default();
+
+        let track_actor = TrackActor::new_with(
+            track_uid,
+            if create_master_track {
+                &self.action_sender
+            } else {
+                &self.master_track_info.action_sender
+            },
+            &self.uid_factory,
+        );
+        if create_master_track {
+            self.master_track_info = TrackActorInfo {
+                uid: track_uid,
+                sender: track_actor.sender().clone(),
+                action_sender: track_actor.child_track_action_sender().clone(),
+            };
+        } else {
+            let _ = self
+                .master_track_info
+                .sender
+                .try_send(TrackRequest::AddSourceTrack(
+                    track_uid,
+                    track_actor.sender().clone(),
+                ));
+        }
         self.ordered_track_uids.push(track_uid.clone());
         self.tracks.insert(track_uid, track_actor);
+
         Ok(track_uid)
     }
 
-    fn create_track(&mut self) -> anyhow::Result<TrackUid> {
-        self.create_track_with_uid(self.track_uid_factory.mint_next())
-    }
-
     fn delete_track(&mut self, uid: TrackUid) {
+        assert!(uid != self.master_track_info.uid);
+        let _ = self
+            .master_track_info
+            .sender
+            .try_send(TrackRequest::RemoveSourceTrack(uid));
+        if let Some(track) = self.tracks.get(&uid) {
+            track.send_request(TrackRequest::Quit);
+        }
         self.ordered_track_uids.retain(|t| *t != uid);
         self.tracks.remove(&uid);
     }
@@ -367,7 +408,9 @@ impl Displays for Engine {
             if let Some(track) = self.tracks.get_mut(&track_uid) {
                 track.ui(ui);
 
-                if track_uid != self.master_track_uid {
+                if track_uid == self.master_track_info.uid {
+                    ui.add_enabled(false, Button::new("Master Track can't be deleted"));
+                } else {
                     if ui.button(format!("Delete Track {}", track_uid)).clicked() {
                         track_index_to_delete = Some(track_uid);
                     };
