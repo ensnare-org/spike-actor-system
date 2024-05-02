@@ -1,37 +1,36 @@
 use crate::{
     always::AlwaysSame,
     busy::BusyWaiter,
-    entity::{EntityActor, EntityInput},
-    orchestration::EngineInput,
+    entity::{EntityAction, EntityActor, EntityRequest},
+    traits::ProvidesActorService,
     ATOMIC_ORDERING,
 };
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Select, Sender};
 use ensnare::prelude::*;
 use ensnare_toys::{ToyInstrument, ToySynth};
 use std::sync::{atomic::AtomicUsize, Arc, Mutex};
 
 #[derive(Debug)]
-pub enum TrackInput {
+pub enum TrackRequest {
     Midi(MidiChannel, MidiMessage),
     Control(ControlIndex, ControlValue),
     NeedsAudio(usize),
     NeedsTransformation(Vec<StereoSample>),
-    Frames(Vec<StereoSample>),
     Quit,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
-pub enum TrackEvent {
+pub enum TrackAction {
     Midi(MidiChannel, MidiMessage),
-    Control(ControlIndex, ControlValue),
-    Quit,
+    Control(Uid, ControlValue),
+    Frames(Vec<StereoSample>),
 }
 
 #[derive(Debug)]
 pub struct TrackActor {
-    input_channel_pair: ChannelPair<TrackInput>,
-    sender: Sender<EngineInput>,
+    request_channel_pair: ChannelPair<TrackRequest>,
+    action_sender: Sender<TrackAction>,
+    entity_action_channel_pair: ChannelPair<EntityAction>,
 
     inner: Arc<Mutex<Track>>,
 }
@@ -40,14 +39,23 @@ impl Displays for TrackActor {
         self.inner.lock().unwrap().ui(ui)
     }
 }
-impl TrackActor {
-    pub fn new_with(track_uid: TrackUid, sender: &Sender<EngineInput>) -> Self {
-        let input_channel_pair = ChannelPair::<TrackInput>::default();
-        let track = Track::new_with(track_uid, &input_channel_pair.sender);
+impl ProvidesActorService<TrackRequest, TrackAction> for TrackActor {
+    fn action_sender(&self) -> &Sender<TrackAction> {
+        &self.action_sender
+    }
 
+    fn sender(&self) -> &Sender<TrackRequest> {
+        &self.request_channel_pair.sender
+    }
+}
+impl TrackActor {
+    pub fn new_with(track_uid: TrackUid, sender: &Sender<TrackAction>) -> Self {
+        let entity_action_channel_pair = ChannelPair::<EntityAction>::default();
+        let track = Track::new_with(track_uid, &entity_action_channel_pair.sender);
         let mut r = Self {
-            input_channel_pair,
-            sender: sender.clone(),
+            request_channel_pair: Default::default(),
+            action_sender: sender.clone(),
+            entity_action_channel_pair,
             inner: Arc::new(Mutex::new(track)),
         };
 
@@ -57,73 +65,114 @@ impl TrackActor {
     }
 
     fn start_thread(&mut self) {
-        let receiver = self.input_channel_pair.receiver.clone();
-        let sender = self.sender.clone();
+        let input_receiver = self.request_channel_pair.receiver.clone();
+        let sender = self.action_sender.clone();
         let mut buffer = GenerationBuffer::<StereoSample>::default();
         let pending_instrument_count = AtomicUsize::default();
         let track = Arc::clone(&self.inner);
+        let entity_receiver = self.entity_action_channel_pair.receiver.clone();
 
         std::thread::spawn(move || {
-            loop {
-                if let Ok(input) = receiver.recv() {
-                    match input {
-                        TrackInput::Midi(channel, message) => {
-                            if let Ok(track) = track.lock() {
-                                for actor in track.actors.iter() {
-                                    let _ = actor.send(EntityInput::Midi(channel, message));
-                                }
-                            }
-                        }
-                        TrackInput::Control(index, value) => {
-                            if let Ok(track) = track.lock() {
-                                for actor in track.actors.iter() {
-                                    let _ = actor.send(EntityInput::Control(index, value));
-                                }
-                            }
-                        }
-                        TrackInput::Frames(frames) => {
-                            assert!(frames.len() <= 64);
-                            // We got some audio from an instrument. Mix it into
-                            // the track buffer.
-                            buffer.merge(&frames);
-                            // Then see if we've gotten all the ones we expect.
-                            if pending_instrument_count.fetch_sub(1, ATOMIC_ORDERING) == 1 {
-                                // We have. Send our completed track to the owner.
-                                let _ = sender.send(EngineInput::Frames(buffer.buffer().to_vec()));
-                            }
-                        }
-                        TrackInput::NeedsAudio(count) => {
-                            buffer.resize(count);
-                            buffer.clear();
-                            if let Ok(mut track) = track.lock() {
-                                assert_eq!(pending_instrument_count.load(ATOMIC_ORDERING), 0);
+            let mut sel = Select::default();
 
-                                if track.actors.is_empty() {
-                                    // TODO: consolidate this with the Frames
-                                    // case, because I'm sure this will grow in
-                                    // complexity, and we'll end up having to
-                                    // maintain two copies.
-                                    let _ =
-                                        sender.send(EngineInput::Frames(buffer.buffer().to_vec()));
-                                } else {
-                                    pending_instrument_count
-                                        .fetch_add(track.actors.len(), ATOMIC_ORDERING);
-                                    for actor in track.actors.iter_mut() {
-                                        let _ = actor.send(EntityInput::NeedsAudio(count));
+            let input_index = sel.recv(&input_receiver);
+            let entity_index = sel.recv(&entity_receiver);
+            loop {
+                let oper = sel.select();
+                match oper.index() {
+                    index if index == input_index => {
+                        if let Ok(input) = oper.recv(&input_receiver) {
+                            match input {
+                                TrackRequest::Midi(channel, message) => {
+                                    if let Ok(track) = track.lock() {
+                                        for actor in track.actors.iter() {
+                                            let _ =
+                                                actor.send(EntityRequest::Midi(channel, message));
+                                        }
                                     }
                                 }
+                                TrackRequest::Control(index, value) => {
+                                    if let Ok(track) = track.lock() {
+                                        for actor in track.actors.iter() {
+                                            let _ =
+                                                actor.send(EntityRequest::Control(index, value));
+                                        }
+                                    }
+                                }
+                                TrackRequest::NeedsAudio(count) => {
+                                    buffer.resize(count);
+                                    buffer.clear();
+                                    if let Ok(track) = track.lock() {
+                                        assert_eq!(
+                                            pending_instrument_count.load(ATOMIC_ORDERING),
+                                            0
+                                        );
+
+                                        if track.actors.is_empty() {
+                                            // TODO: consolidate this with the Frames
+                                            // case, because I'm sure this will grow in
+                                            // complexity, and we'll end up having to
+                                            // maintain two copies.
+                                            let _ = sender.send(TrackAction::Frames(
+                                                buffer.buffer().to_vec(),
+                                            ));
+                                        } else {
+                                            pending_instrument_count
+                                                .fetch_add(track.actors.len(), ATOMIC_ORDERING);
+                                            for actor in track.actors.iter() {
+                                                let _ =
+                                                    actor.send(EntityRequest::NeedsAudio(count));
+                                            }
+                                        }
+                                    }
+                                }
+                                TrackRequest::NeedsTransformation(_) => todo!(),
+                                TrackRequest::Quit => {
+                                    if let Ok(track) = track.lock() {
+                                        for actor in track.actors.iter() {
+                                            let _ = actor.send(EntityRequest::Quit);
+                                        }
+                                    }
+                                    break;
+                                }
                             }
                         }
-                        TrackInput::NeedsTransformation(_) => todo!(),
-                        TrackInput::Quit => break,
+                    }
+                    index if index == entity_index => {
+                        if let Ok(action) = oper.recv(&entity_receiver) {
+                            match action {
+                                EntityAction::Midi(_uid, channel, message) => {
+                                    let _ = sender.send(TrackAction::Midi(channel, message));
+                                }
+                                EntityAction::Control(source_uid, value) => {
+                                    let _ = sender.send(TrackAction::Control(source_uid, value));
+                                }
+                                EntityAction::Frames(frames) => {
+                                    assert!(frames.len() <= 64);
+                                    // We got some audio from an instrument. Mix it into
+                                    // the track buffer.
+                                    buffer.merge(&frames);
+                                    // Then see if we've gotten all the ones we expect.
+                                    if pending_instrument_count.fetch_sub(1, ATOMIC_ORDERING) == 1 {
+                                        // We have. Send our completed track to the owner.
+                                        let _ = sender
+                                            .send(TrackAction::Frames(buffer.buffer().to_vec()));
+                                    }
+                                }
+                                EntityAction::Transformed(frames) => {
+                                    assert!(frames.len() <= 64);
+                                    // We got audio from an effect. It replaces the track buffer.
+                                    buffer.buffer_mut().copy_from_slice(&frames);
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        panic!()
                     }
                 }
             }
         });
-    }
-
-    pub fn send(&self, input: TrackInput) {
-        let _ = self.input_channel_pair.sender.send(input);
     }
 }
 
@@ -131,21 +180,24 @@ impl TrackActor {
 struct Track {
     #[allow(dead_code)]
     uid: TrackUid,
-    sender: Sender<TrackInput>,
+    entity_action_sender: Sender<EntityAction>,
     actors: Vec<EntityActor>,
 }
 impl Track {
-    fn new_with(uid: TrackUid, sender: &Sender<TrackInput>) -> Self {
+    fn new_with(uid: TrackUid, entity_action_sender: &Sender<EntityAction>) -> Self {
         Self {
             uid,
-            sender: sender.clone(),
+            entity_action_sender: entity_action_sender.clone(),
             actors: Default::default(),
         }
     }
 
-    fn add_actor(&mut self, entity: impl EntityBounds + 'static) {
-        self.actors
-            .push(EntityActor::new_with(entity, &self.sender));
+    fn add_actor(&mut self, actor: EntityActor) {
+        self.actors.push(actor);
+    }
+
+    fn add_entity(&mut self, entity: impl EntityBounds + 'static) {
+        self.add_actor(EntityActor::new_with(entity, &self.entity_action_sender))
     }
 }
 
@@ -153,22 +205,22 @@ impl Displays for Track {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
         ui.horizontal_top(|ui| {
             if ui.button("Add Synth").clicked() {
-                self.add_actor(ToySynth::default());
+                self.add_entity(ToySynth::default());
             }
             if ui.button("Add ToyInstrument").clicked() {
-                self.add_actor(ToyInstrument::default());
+                self.add_entity(ToyInstrument::default());
             }
             if ui.button("Add Busy Waiter").clicked() {
-                self.add_actor(BusyWaiter::default());
+                self.add_entity(BusyWaiter::default());
             }
             if ui.button("Add 1.0").clicked() {
-                self.add_actor(AlwaysSame::new_with(1.0));
+                self.add_entity(AlwaysSame::new_with(1.0));
             }
             if ui.button("Add 0.5").clicked() {
-                self.add_actor(AlwaysSame::new_with(0.5));
+                self.add_entity(AlwaysSame::new_with(0.5));
             }
             if ui.button("Add -1.0").clicked() {
-                self.add_actor(AlwaysSame::new_with(-1.0));
+                self.add_entity(AlwaysSame::new_with(-1.0));
             }
             let mut actor_to_remove = None;
             for (i, actor) in self.actors.iter_mut().enumerate() {

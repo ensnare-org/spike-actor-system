@@ -85,6 +85,15 @@
 //! 10. The master track is one giant aux track. So it has an instrument count,
 //!     effects, etc.
 //! 11. If the master track is done, broadcast its buffer.
+//!
+//! Terminology
+//!
+//! - Input: A message sent from a client to a service that tells the service to
+//!   do something or informs it that something happened.
+//! - Event: A message broadcast by a service to its client(s) saying that
+//!   something happened.
+//! - Request: A message sent from an actor's owner to ask the actor to do something.
+//! - Action: A message sent by an actor to inform its owner of completed work.
 
 use crate::orchestration::EngineServiceEvent;
 use anyhow::anyhow;
@@ -226,6 +235,10 @@ impl ServiceManager {
                                 EngineServiceEvent::NewOrchestratress(new_o) => {
                                     let _ =
                                         sm_sender.try_send(ServiceEvent::NewOrchestratress(new_o));
+                                }
+                                EngineServiceEvent::Midi(channel, message) => {
+                                    let _ = midi_sender
+                                        .send(MidiInterfaceServiceInput::Midi(channel, message));
                                 }
                             }
                         }

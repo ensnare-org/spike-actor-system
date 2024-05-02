@@ -20,14 +20,6 @@ impl Displays for AlwaysSame {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
         ui.label(format!("My value: {:0.2}", self.value))
     }
-
-    fn set_action(&mut self, action: DisplaysAction) {}
-
-    fn take_action(&mut self) -> Option<DisplaysAction> {
-        None
-    }
-
-    fn set_view_range(&mut self, view_range: &ViewRange) {}
 }
 impl Controllable for AlwaysSame {}
 impl AlwaysSame {

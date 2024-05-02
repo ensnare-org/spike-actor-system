@@ -1,10 +1,7 @@
+use crate::traits::ProvidesService;
 use anyhow::anyhow;
-use ensnare::
-    prelude::*
-;
-use std::
-    path::PathBuf
-;
+use ensnare::prelude::*;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum WavWriterInput {
@@ -13,7 +10,6 @@ pub enum WavWriterInput {
     Quit,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum WavWriterEvent {
     Err(anyhow::Error),
@@ -38,10 +34,6 @@ impl WavWriterService {
 
         r.start_thread();
         r
-    }
-
-    pub fn send_input(&self, input: WavWriterInput) {
-        let _ = self.input_channel_pair.sender.try_send(input);
     }
 
     fn start_thread(&self) {
@@ -102,5 +94,14 @@ impl WavWriterService {
                 }
             }
         });
+    }
+}
+impl ProvidesService<WavWriterInput, WavWriterEvent> for WavWriterService {
+    fn receiver(&self) -> &crossbeam_channel::Receiver<WavWriterEvent> {
+        &self.event_channel_pair.receiver
+    }
+
+    fn sender(&self) -> &crossbeam_channel::Sender<WavWriterInput> {
+        &self.input_channel_pair.sender
     }
 }
