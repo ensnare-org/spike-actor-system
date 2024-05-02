@@ -94,6 +94,14 @@
 //!   something happened.
 //! - Request: A message sent from an actor's owner to ask the actor to do something.
 //! - Action: A message sent by an actor to inform its owner of completed work.
+//! 
+//! - Want master track output
+//! - Master track output depends on effects chain
+//! - Effects chain depends on source set.
+//! - Source set depend on each source in the set.
+//! - A single source is a track or an instrument.
+//! - An instrument has no dependencies.
+//! - A track's dependencies is described above.
 
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Select, Sender};
