@@ -94,7 +94,7 @@
 //!   something happened.
 //! - Request: A message sent from an actor's owner to ask the actor to do something.
 //! - Action: A message sent by an actor to inform its owner of completed work.
-//! 
+//!
 //! - Want master track output
 //! - Master track output depends on effects chain
 //! - Effects chain depends on source set.
@@ -119,7 +119,7 @@ mod arp;
 mod busy;
 mod engine;
 mod entity;
-mod inverts;
+mod quietener;
 mod track;
 mod traits;
 mod wav_writer;

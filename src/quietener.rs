@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, IsEntity, Metadata, Serialize, Deserialize)]
 #[entity(Controls, GeneratesStereoSample)]
-pub struct AlwaysSame {
+pub struct Quietener {
     uid: Uid,
 }
-impl TransformsAudio for AlwaysSame {
+impl TransformsAudio for Quietener {
     fn transform(&mut self, samples: &mut [StereoSample]) {
         for sample in samples {
             *sample = StereoSample(
@@ -18,11 +18,11 @@ impl TransformsAudio for AlwaysSame {
     }
 
     fn transform_channel(&mut self, _channel: usize, input_sample: Sample) -> Sample {
-        -input_sample
+        input_sample * 0.5
     }
 }
-impl Serializable for AlwaysSame {}
-impl HandlesMidi for AlwaysSame {}
-impl Configurable for AlwaysSame {}
-impl Displays for AlwaysSame {}
-impl Controllable for AlwaysSame {}
+impl Serializable for Quietener {}
+impl HandlesMidi for Quietener {}
+impl Configurable for Quietener {}
+impl Displays for Quietener {}
+impl Controllable for Quietener {}
