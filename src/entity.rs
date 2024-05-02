@@ -42,6 +42,7 @@ pub enum EntityAction {
 
 #[derive(Debug)]
 pub struct EntityActor {
+    uid: Uid,
     request_channel_pair: ChannelPair<EntityRequest>,
     action_sender: Sender<EntityAction>,
     entity: Arc<Mutex<dyn EntityBounds>>,
@@ -52,14 +53,17 @@ impl EntityActor {
         entity: impl EntityBounds + 'static,
         action_sender: &Sender<EntityAction>,
     ) -> Self {
-        Self::new_with_wrapped(Arc::new(Mutex::new(entity)), action_sender)
+        let uid = entity.uid();
+        Self::new_with_wrapped(uid, Arc::new(Mutex::new(entity)), action_sender)
     }
 
     pub fn new_with_wrapped(
+        uid: Uid,
         entity: Arc<Mutex<dyn EntityBounds>>,
         action_sender: &Sender<EntityAction>,
     ) -> Self {
         let r = Self {
+            uid,
             request_channel_pair: Default::default(),
             action_sender: action_sender.clone(),
             entity,
@@ -146,6 +150,10 @@ impl EntityActor {
 
     pub fn send(&self, msg: EntityRequest) {
         let _ = self.request_channel_pair.sender.try_send(msg);
+    }
+
+    pub(crate) fn uid(&self) -> Uid {
+        self.uid
     }
 }
 impl ProvidesActorService<EntityRequest, EntityAction> for EntityActor {

@@ -108,6 +108,7 @@ use std::{
 use traits::ProvidesService;
 
 mod always;
+mod arp;
 mod busy;
 mod entity;
 mod orchestration;
@@ -212,7 +213,9 @@ impl ServiceManager {
                                     let _ = engine_sender
                                         .try_send(EngineServiceInput::Midi(channel, message));
                                 }
-                                MidiServiceEvent::MidiOut => todo!("blink the activity indicator"),
+                                MidiServiceEvent::MidiOut => {
+                                    // TODO: blink activity.... (or get rid of this, because we sent it so we already know about it....)
+                                },
                                 MidiServiceEvent::InputPortsRefreshed(ports) => {
                                     eprintln!("inputs: {ports:?}");
                                     let _ = midi_sender.try_send(
@@ -274,22 +277,22 @@ impl ServiceManager {
 #[derive(Debug)]
 struct ActorSystemApp {
     service_manager: ServiceManager,
-    orchestratress: Option<Arc<Mutex<Engine>>>,
+    engine: Option<Arc<Mutex<Engine>>>,
 }
 impl eframe::App for ActorSystemApp {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         loop {
             if let Ok(event) = self.service_manager.receiver().try_recv() {
                 match event {
-                    ServiceEvent::NewOrchestratress(new_o) => self.orchestratress = Some(new_o),
+                    ServiceEvent::NewOrchestratress(new_o) => self.engine = Some(new_o),
                 }
             } else {
                 break;
             }
         }
         CentralPanel::default().show(ctx, |ui| {
-            if let Some(orchestratress) = self.orchestratress.as_ref() {
-                orchestratress.lock().unwrap().ui(ui);
+            if let Some(engine) = self.engine.as_ref() {
+                engine.lock().unwrap().ui(ui);
             }
         });
         ctx.request_repaint_after(Duration::from_millis(100));
@@ -305,7 +308,7 @@ impl ActorSystemApp {
     pub fn new() -> Self {
         Self {
             service_manager: ServiceManager::new(),
-            orchestratress: None,
+            engine: None,
         }
     }
 }

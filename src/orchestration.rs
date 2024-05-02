@@ -24,6 +24,10 @@ pub enum EngineServiceInput {
     Midi(MidiChannel, MidiMessage),
     /// The audio interface needs more audio.
     NeedsAudio(usize),
+    /// Start playing.
+    Play,
+    /// Stop playing.
+    Stop,
     /// The client would like the service to exit.
     Quit,
 }
@@ -135,6 +139,8 @@ impl EngineService {
                                     writer_service.send_input(WavWriterInput::Quit);
                                     break;
                                 }
+                                EngineServiceInput::Play => engine.lock().unwrap().play(),
+                                EngineServiceInput::Stop => engine.lock().unwrap().stop(),
                             }
                         }
                     }
@@ -208,10 +214,13 @@ pub struct Engine {
 
     ordered_track_uids: Vec<TrackUid>,
     tracks: HashMap<TrackUid, TrackActor>,
-    track_uid_factory: TrackUidFactory,
+    track_uid_factory: Arc<TrackUidFactory>,
     master_track_uid: TrackUid,
 
     track_pending_count: usize,
+
+    transport: Transport,
+    uid_factory: Arc<EntityUidFactory>,
 }
 impl Configurable for Engine {
     delegate! {
@@ -247,9 +256,23 @@ impl HandlesMidi for Engine {
         None
     }
 }
+impl Controls for Engine {
+    delegate! {
+        to self.transport {
+            fn time_range(&self) -> Option<TimeRange>;
+            fn update_time_range(&mut self, time_range: &TimeRange);
+            fn work(&mut self, control_events_fn: &mut ControlEventsFn);
+            fn is_finished(&self) -> bool;
+            fn play(&mut self);
+            fn stop(&mut self);
+            fn skip_to_start(&mut self);
+            fn is_performing(&self) -> bool;
+        }
+    }
+}
 impl Engine {
     pub fn new_with_sender(action_sender: &Sender<TrackAction>) -> Self {
-        let track_uid_factory = TrackUidFactory::default();
+        let track_uid_factory: Arc<TrackUidFactory> = Default::default();
         let master_track_uid = track_uid_factory.mint_next();
 
         let mut r = Self {
@@ -261,6 +284,8 @@ impl Engine {
             track_uid_factory,
             master_track_uid,
             track_pending_count: Default::default(),
+            transport: Default::default(),
+            uid_factory: Default::default(),
         };
 
         r.create_track_with_uid(r.master_track_uid).unwrap();
@@ -292,6 +317,18 @@ impl Engine {
                 "we shouldn't start generation while another is pending"
             );
             self.track_pending_count += self.ordered_track_uids.len();
+
+            // Figure out the time slice for this batch of frames.
+            let time_range = self.transport.advance(count);
+
+            // Ask tracks to do their time-based work.
+            for track_uid in self.ordered_track_uids.iter() {
+                if let Some(track) = self.tracks.get(track_uid) {
+                    track.send_request(TrackRequest::Work(time_range.clone()));
+                }
+            }
+
+            // Ask tracks to do their frame-based work.
             for track_uid in self.ordered_track_uids.iter() {
                 if let Some(track) = self.tracks.get(track_uid) {
                     track.send_request(TrackRequest::NeedsAudio(count));
@@ -301,7 +338,7 @@ impl Engine {
     }
 
     fn create_track_with_uid(&mut self, track_uid: TrackUid) -> anyhow::Result<TrackUid> {
-        let track_actor = TrackActor::new_with(track_uid, &self.action_sender);
+        let track_actor = TrackActor::new_with(track_uid, &self.action_sender, &self.uid_factory);
         self.ordered_track_uids.push(track_uid.clone());
         self.tracks.insert(track_uid, track_actor);
         Ok(track_uid)
@@ -346,9 +383,15 @@ impl Displays for Engine {
             let _ = self.create_track();
         }
 
-        ui.separator();
+        let response = ui.separator();
 
-        ui.separator();
-        ui.label("Coming soon!")
+        if ui.button("Play").clicked() {
+            self.play();
+        }
+        if ui.button("Stop").clicked() {
+            self.play();
+        }
+
+        response
     }
 }

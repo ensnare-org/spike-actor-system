@@ -1,5 +1,6 @@
 use crate::{
     always::AlwaysSame,
+    arp::Arpeggiator,
     busy::BusyWaiter,
     entity::{EntityAction, EntityActor, EntityRequest},
     traits::ProvidesActorService,
@@ -12,10 +13,17 @@ use std::sync::{atomic::AtomicUsize, Arc, Mutex};
 
 #[derive(Debug)]
 pub enum TrackRequest {
+    /// The track should handle an incoming MIDI message.
     Midi(MidiChannel, MidiMessage),
+    /// Broken - meaningless
     Control(ControlIndex, ControlValue),
+    /// The track should perform work for the given slice of time.
+    Work(TimeRange),
+    /// The track should generate a buffer of audio frames.
     NeedsAudio(usize),
+    /// The track should process this audio buffer (effects -- this isn't right)
     NeedsTransformation(Vec<StereoSample>),
+    /// The [TrackActor] should exit.
     Quit,
 }
 
@@ -49,9 +57,13 @@ impl ProvidesActorService<TrackRequest, TrackAction> for TrackActor {
     }
 }
 impl TrackActor {
-    pub fn new_with(track_uid: TrackUid, sender: &Sender<TrackAction>) -> Self {
+    pub fn new_with(
+        track_uid: TrackUid,
+        sender: &Sender<TrackAction>,
+        uid_factory: &Arc<EntityUidFactory>,
+    ) -> Self {
         let entity_action_channel_pair = ChannelPair::<EntityAction>::default();
-        let track = Track::new_with(track_uid, &entity_action_channel_pair.sender);
+        let track = Track::new_with(track_uid, &entity_action_channel_pair.sender, uid_factory);
         let mut r = Self {
             request_channel_pair: Default::default(),
             action_sender: sender.clone(),
@@ -135,13 +147,28 @@ impl TrackActor {
                                     }
                                     break;
                                 }
+                                TrackRequest::Work(time_range) => {
+                                    if let Ok(track) = track.lock() {
+                                        for actor in track.actors.iter() {
+                                            let _ =
+                                                actor.send(EntityRequest::Work(time_range.clone()));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                     index if index == entity_index => {
                         if let Ok(action) = oper.recv(&entity_receiver) {
                             match action {
-                                EntityAction::Midi(_uid, channel, message) => {
+                                EntityAction::Midi(uid, channel, message) => {
+                                    if let Ok(track) = track.lock() {
+                                        for actor in track.actors.iter().filter(|&a| a.uid() != uid)
+                                        {
+                                            let _ =
+                                                actor.send(EntityRequest::Midi(channel, message));
+                                        }
+                                    }
                                     let _ = sender.send(TrackAction::Midi(channel, message));
                                 }
                                 EntityAction::Control(source_uid, value) => {
@@ -181,13 +208,19 @@ struct Track {
     #[allow(dead_code)]
     uid: TrackUid,
     entity_action_sender: Sender<EntityAction>,
+    uid_factory: Arc<EntityUidFactory>,
     actors: Vec<EntityActor>,
 }
 impl Track {
-    fn new_with(uid: TrackUid, entity_action_sender: &Sender<EntityAction>) -> Self {
+    fn new_with(
+        uid: TrackUid,
+        entity_action_sender: &Sender<EntityAction>,
+        uid_factory: &Arc<EntityUidFactory>,
+    ) -> Self {
         Self {
             uid,
             entity_action_sender: entity_action_sender.clone(),
+            uid_factory: Arc::clone(uid_factory),
             actors: Default::default(),
         }
     }
@@ -196,7 +229,8 @@ impl Track {
         self.actors.push(actor);
     }
 
-    fn add_entity(&mut self, entity: impl EntityBounds + 'static) {
+    fn add_entity(&mut self, mut entity: impl EntityBounds + 'static) {
+        entity.set_uid(self.uid_factory.mint_next());
         self.add_actor(EntityActor::new_with(entity, &self.entity_action_sender))
     }
 }
@@ -221,6 +255,9 @@ impl Displays for Track {
             }
             if ui.button("Add -1.0").clicked() {
                 self.add_entity(AlwaysSame::new_with(-1.0));
+            }
+            if ui.button("Add Arpeggiator").clicked() {
+                self.add_entity(Arpeggiator::default());
             }
             let mut actor_to_remove = None;
             for (i, actor) in self.actors.iter_mut().enumerate() {
