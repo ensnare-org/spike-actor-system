@@ -353,6 +353,7 @@ impl Engine {
 
         let track_actor = TrackActor::new_with(
             track_uid,
+            create_master_track,
             if create_master_track {
                 &self.action_sender
             } else {
