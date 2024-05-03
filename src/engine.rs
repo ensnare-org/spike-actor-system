@@ -209,13 +209,13 @@ impl EngineService {
 
 #[derive(Debug)]
 struct TrackActorInfo {
-    pub uid: TrackUid,
+    pub track_uid: TrackUid,
     pub sender: Sender<TrackRequest>,
     pub action_sender: Sender<TrackAction>,
 }
 impl TrackActorInfo {
     fn is_default(&self) -> bool {
-        self.uid == TrackUid(0)
+        self.track_uid == TrackUid(0)
     }
 }
 impl Default for TrackActorInfo {
@@ -223,7 +223,7 @@ impl Default for TrackActorInfo {
         let dummy_request_channel = ChannelPair::<TrackRequest>::default();
         let dummy_action_channel = ChannelPair::<TrackAction>::default();
         Self {
-            uid: TrackUid(0), // Hack: this is an invalid uid
+            track_uid: TrackUid(0), // Hack: this is an invalid uid
             sender: dummy_request_channel.sender.clone(),
             action_sender: dummy_action_channel.sender.clone(),
         }
@@ -320,7 +320,6 @@ impl Engine {
     }
 
     pub fn start_generation(&mut self, count: usize) {
-        println!("start {count}");
         self.buffer.resize(count);
         self.buffer.clear();
 
@@ -363,7 +362,7 @@ impl Engine {
         );
         if create_master_track {
             self.master_track_info = TrackActorInfo {
-                uid: track_uid,
+                track_uid,
                 sender: track_actor.sender().clone(),
                 action_sender: track_actor.child_track_action_sender().clone(),
             };
@@ -383,7 +382,7 @@ impl Engine {
     }
 
     fn delete_track(&mut self, uid: TrackUid) {
-        assert!(uid != self.master_track_info.uid);
+        assert!(uid != self.master_track_info.track_uid);
         let _ = self
             .master_track_info
             .sender
@@ -409,7 +408,7 @@ impl Displays for Engine {
             if let Some(track) = self.tracks.get_mut(&track_uid) {
                 track.ui(ui);
 
-                if track_uid == self.master_track_info.uid {
+                if track_uid == self.master_track_info.track_uid {
                     ui.add_enabled(false, Button::new("Master Track can't be deleted"));
                 } else {
                     if ui.button(format!("Delete Track {}", track_uid)).clicked() {
@@ -433,7 +432,7 @@ impl Displays for Engine {
             self.play();
         }
         if ui.button("Stop").clicked() {
-            self.play();
+            self.stop();
         }
 
         response
