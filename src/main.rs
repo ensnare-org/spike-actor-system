@@ -211,13 +211,12 @@ impl ServiceManager {
                                     let _ = engine_sender
                                         .try_send(EngineServiceInput::NeedsAudio(count));
                                 }
-                                AudioServiceEvent::Underrun => println!("FYI underrun"),
+                                AudioServiceEvent::Underrun => eprintln!("FYI underrun"),
                             }
                         }
                     }
                     index if index == midi_index => {
                         if let Ok(event) = operation.recv(&midi_receiver) {
-                            println!("{event:?}");
                             match event {
                                 MidiServiceEvent::Midi(channel, message) => {
                                     let _ = engine_sender
@@ -243,7 +242,6 @@ impl ServiceManager {
                     }
                     index if index == engine_index => {
                         if let Ok(event) = operation.recv(&engine_receiver) {
-                            println!("{event:?}");
                             match event {
                                 EngineServiceEvent::NewOrchestratress(new_o) => {
                                     let _ =
@@ -258,7 +256,6 @@ impl ServiceManager {
                     }
                     index if index == ui_index => {
                         if let Ok(input) = operation.recv(&sm_receiver) {
-                            println!("{input:?}");
                             match input {
                                 ServiceInput::Quit => {
                                     let _ = audio_sender.try_send(AudioServiceInput::Quit);
