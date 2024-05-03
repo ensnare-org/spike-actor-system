@@ -1,18 +1,38 @@
+use derivative::Derivative;
 use ensnare::prelude::*;
 use ensnare_proc_macros::{IsEntity, Metadata};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, IsEntity, Metadata, Serialize, Deserialize)]
+#[derive(Debug, Derivative, IsEntity, Metadata, Serialize, Deserialize)]
+#[derivative(Default)]
 #[entity(TransformsAudio)]
 pub struct Arpeggiator {
     uid: Uid,
     last_beat: usize,
     is_playing: bool,
     should_play_low_note: bool,
+    #[derivative(Default(value = "60"))]
+    base_note: u8,
+    note_we_are_playing: u8,
     time_range: TimeRange,
 }
 impl Serializable for Arpeggiator {}
-impl HandlesMidi for Arpeggiator {}
+impl HandlesMidi for Arpeggiator {
+    fn handle_midi_message(
+        &mut self,
+        _channel: MidiChannel,
+        message: MidiMessage,
+        _midi_messages_fn: &mut MidiMessagesFn,
+    ) {
+        match message {
+            #[allow(unused_variables)]
+            MidiMessage::NoteOn { key, vel } => {
+                self.base_note = key.into();
+            }
+            _ => {}
+        }
+    }
+}
 impl Generates<StereoSample> for Arpeggiator {}
 impl Configurable for Arpeggiator {}
 impl Displays for Arpeggiator {
@@ -42,16 +62,17 @@ impl Controls for Arpeggiator {
             if beat_changed {
                 control_events_fn(WorkEvent::Midi(
                     MidiChannel::default(),
-                    MidiUtils::new_note_off(if self.should_play_low_note { 60 } else { 67 }, 127),
+                    MidiUtils::new_note_off(self.note_we_are_playing, 127),
                 ));
                 self.is_playing = false;
                 self.should_play_low_note = !self.should_play_low_note;
             }
         } else {
             if beat_changed {
+                self.note_we_are_playing = self.get_note_to_play();
                 control_events_fn(WorkEvent::Midi(
                     MidiChannel::default(),
-                    MidiUtils::new_note_on(if self.should_play_low_note { 60 } else { 67 }, 127),
+                    MidiUtils::new_note_on(self.note_we_are_playing, 127),
                 ));
                 self.is_playing = true;
             }
@@ -70,5 +91,11 @@ impl Controls for Arpeggiator {
 
     fn is_performing(&self) -> bool {
         false
+    }
+}
+
+impl Arpeggiator {
+    fn get_note_to_play(&mut self) -> u8 {
+        self.base_note + if self.should_play_low_note { 0 } else { 7 }
     }
 }
