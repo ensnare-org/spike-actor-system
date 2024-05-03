@@ -7,11 +7,11 @@ use crate::{
     traits::ProvidesActorService,
 };
 use crossbeam_channel::{Select, Sender};
-use eframe::egui::ahash::HashMap;
+use eframe::egui::{Color32, Frame, Margin, Stroke};
 use ensnare::prelude::*;
 use ensnare_toys::{ToyInstrument, ToySynth};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -79,6 +79,7 @@ impl TrackActorStateMachine {
     fn handle_control(&mut self, source_uid: Uid, value: ControlValue) {
         let _ = self.sender.send(TrackAction::Control(source_uid, value));
     }
+
     fn handle_track_action(&mut self, action: TrackAction) {
         match action {
             TrackAction::Midi(channel, message) => {
@@ -88,6 +89,10 @@ impl TrackActorStateMachine {
                 self.handle_control(source_uid, value);
             }
             TrackAction::Frames(frames) => {
+                // TODO: if we're receiving this, then we might be a parent of a
+                // track that is waiting as an aux track for this frame. Think
+                // about how to represent that (and should the master track be
+                // using the same method?).
                 self.handle_incoming_frames(frames);
             }
         }
@@ -98,13 +103,13 @@ impl TrackActorStateMachine {
         match &self.state {
             TrackActorState::Idle => panic!("We got frames when we weren't expecting any"),
             TrackActorState::AwaitingSources(_) => {
-                // We got some audio from a track. Mix it
-                // into the track buffer.
+                // We got some audio from someone. Mix it into the track buffer.
                 self.buffer.merge(&frames);
                 self.advance_state_awaiting_sources();
             }
             TrackActorState::AwaitingEffect(_) => {
-                // An effect completed processing. Copy its results over the current buffer.
+                // An effect completed processing. Copy its results over the
+                // current buffer.
                 self.buffer.buffer_mut().copy_from_slice(&frames);
                 self.advance_state_awaiting_effect();
             }
@@ -117,7 +122,8 @@ impl TrackActorStateMachine {
             TrackActorState::AwaitingSources(count) => {
                 // We got a frame. See if we've gotten all the ones we expect.
                 if *count == 1 {
-                    // We have. Now it's time to let the effects process what we have.
+                    // We have. Now it's time to let the effects process what we
+                    // have.
                     if let Ok(track) = self.track.lock() {
                         self.state = TrackActorState::AwaitingEffect(VecDeque::from(
                             track.ordered_actor_uids.clone(),
@@ -351,7 +357,6 @@ impl TrackActor {
 
 #[derive(Debug)]
 struct Track {
-    #[allow(dead_code)]
     uid: TrackUid,
     is_master_track: bool,
     entity_action_sender: Sender<EntityAction>,
@@ -424,7 +429,15 @@ impl Displays for Track {
             for &uid in self.ordered_actor_uids.iter() {
                 if let Some(actor) = self.actors.get_mut(&uid) {
                     ui.vertical(|ui| {
-                        actor.ui(ui);
+                        Frame::default()
+                            .stroke(if actor.is_sound_active() {
+                                Stroke::new(2.0, Color32::YELLOW)
+                            } else {
+                                Stroke::default()
+                            })
+                            .inner_margin(Margin::same(4.0))
+                            .show(ui, |ui| actor.ui(ui));
+
                         if ui.button("Remove").clicked() {
                             actor_uid_to_remove = Some(uid);
                         }

@@ -46,7 +46,7 @@ pub struct EntityActor {
     request_channel_pair: ChannelPair<EntityRequest>,
     action_sender: Sender<EntityAction>,
     entity: Arc<Mutex<dyn EntityBounds>>,
-    is_emitting_sound: Arc<AtomicBool>,
+    is_sound_active: Arc<AtomicBool>,
 }
 impl EntityActor {
     pub fn new_with(
@@ -67,7 +67,7 @@ impl EntityActor {
             request_channel_pair: Default::default(),
             action_sender: action_sender.clone(),
             entity,
-            is_emitting_sound: Default::default(),
+            is_sound_active: Default::default(),
         };
         r.start_input_thread();
         r
@@ -78,7 +78,7 @@ impl EntityActor {
         let sender = self.action_sender.clone();
         let entity = Arc::clone(&self.entity);
         let mut buffer = GenerationBuffer::<StereoSample>::default();
-        let is_emitting_sound = Arc::clone(&self.is_emitting_sound);
+        let is_sound_active = Arc::clone(&self.is_sound_active);
 
         std::thread::spawn(move || {
             while let Ok(input) = receiver.recv() {
@@ -100,9 +100,10 @@ impl EntityActor {
                     EntityRequest::NeedsAudio(count) => {
                         buffer.resize(count);
                         buffer.clear();
-                        entity.lock().unwrap().generate(buffer.buffer_mut());
-                        Self::update_is_emitting_sound(&buffer, &is_emitting_sound);
-
+                        is_sound_active.store(
+                            entity.lock().unwrap().generate(buffer.buffer_mut()),
+                            ATOMIC_ORDERING,
+                        );
                         let _ = sender.try_send(EntityAction::Frames(buffer.buffer().to_vec()));
                     }
                     EntityRequest::Quit => {
@@ -113,7 +114,6 @@ impl EntityActor {
                         buffer.resize(count);
                         buffer.buffer_mut().copy_from_slice(&frames);
                         entity.lock().unwrap().transform(buffer.buffer_mut());
-                        Self::update_is_emitting_sound(&buffer, &is_emitting_sound);
                         let _ =
                             sender.try_send(EntityAction::Transformed(buffer.buffer().to_vec()));
                     }
@@ -137,15 +137,7 @@ impl EntityActor {
                     }
                 }
             }
-            eprintln!("EntityActor exit");
         });
-    }
-
-    fn update_is_emitting_sound(buffer: &GenerationBuffer<StereoSample>, var: &Arc<AtomicBool>) {
-        var.store(
-            buffer.buffer().iter().any(|&s| s != StereoSample::SILENCE),
-            ATOMIC_ORDERING,
-        );
     }
 
     pub fn send(&self, msg: EntityRequest) {
@@ -154,6 +146,10 @@ impl EntityActor {
 
     pub(crate) fn uid(&self) -> Uid {
         self.uid
+    }
+
+    pub(crate) fn is_sound_active(&self) -> bool {
+        self.is_sound_active.load(ATOMIC_ORDERING)
     }
 }
 impl ProvidesActorService<EntityRequest, EntityAction> for EntityActor {
@@ -167,17 +163,6 @@ impl ProvidesActorService<EntityRequest, EntityAction> for EntityActor {
 }
 impl Displays for EntityActor {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
-        Frame::default()
-            .stroke(if self.is_emitting_sound.load(ATOMIC_ORDERING) {
-                Stroke::new(2.0, Color32::YELLOW)
-            } else {
-                Stroke::default()
-            })
-            .inner_margin(Margin::same(4.0))
-            .show(ui, |ui| {
-                let mut entity = self.entity.lock().unwrap();
-                entity.ui(ui)
-            })
-            .inner
+        self.entity.lock().unwrap().ui(ui)
     }
 }
