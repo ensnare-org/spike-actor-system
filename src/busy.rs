@@ -12,12 +12,13 @@ pub struct BusyWaiter {
 impl Serializable for BusyWaiter {}
 impl HandlesMidi for BusyWaiter {}
 impl Generates<StereoSample> for BusyWaiter {
-    fn generate(&mut self, values: &mut [StereoSample]) {
+    fn generate(&mut self, values: &mut [StereoSample]) -> bool {
         let aaa: usize = (0..=100000).sum();
-        println!("{aaa}");
+        println!("{aaa}"); // Don't remove this; it keeps the work from being optimized away
         for v in values.iter_mut() {
             *v = StereoSample::from(self.rng.rand_float());
         }
+        true
     }
 }
 impl Configurable for BusyWaiter {}
