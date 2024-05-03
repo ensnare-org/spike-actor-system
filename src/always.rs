@@ -11,8 +11,9 @@ pub struct AlwaysSame {
 impl Serializable for AlwaysSame {}
 impl HandlesMidi for AlwaysSame {}
 impl Generates<StereoSample> for AlwaysSame {
-    fn generate(&mut self, values: &mut [StereoSample]) {
+    fn generate(&mut self, values: &mut [StereoSample]) -> bool {
         values.fill(StereoSample::from(self.value));
+        self.value != 0.0
     }
 }
 impl Configurable for AlwaysSame {}
