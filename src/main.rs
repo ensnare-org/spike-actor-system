@@ -120,6 +120,7 @@ mod busy;
 mod engine;
 mod entity;
 mod quietener;
+mod subscription;
 mod track;
 mod traits;
 mod wav_writer;
@@ -243,7 +244,7 @@ impl ServiceManager {
                     index if index == engine_index => {
                         if let Ok(event) = operation.recv(&engine_receiver) {
                             match event {
-                                EngineServiceEvent::NewOrchestratress(new_o) => {
+                                EngineServiceEvent::NewEngine(new_o) => {
                                     let _ =
                                         sm_sender.try_send(ServiceEvent::NewOrchestratress(new_o));
                                 }

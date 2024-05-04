@@ -1,11 +1,14 @@
-use crate::{traits::ProvidesActorService, ATOMIC_ORDERING};
+use crate::{subscription::Subscription, traits::ProvidesActorService, ATOMIC_ORDERING};
 use crossbeam_channel::Sender;
-use eframe::egui::{Color32, Frame, Margin, Stroke};
 use ensnare::prelude::*;
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
 #[derive(Debug)]
 pub enum EntityRequest {
+    /// Add a subscriber to our actions.
+    Subscribe(Sender<EntityAction>),
+    /// Remove a subscriber from our actions.
+    Unsubscribe(Sender<EntityAction>),
     /// The entity should handle this message (if it listens on this channel).
     /// As with [EntityRequest::Work], it can produce [EntityAction::Midi]
     /// and/or [EntityAction::Control].
@@ -28,7 +31,7 @@ pub enum EntityRequest {
     Quit,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EntityAction {
     /// The entity has emitted a MIDI message.
     Midi(Uid, MidiChannel, MidiMessage),
@@ -44,28 +47,30 @@ pub enum EntityAction {
 pub struct EntityActor {
     uid: Uid,
     request_channel_pair: ChannelPair<EntityRequest>,
-    action_sender: Sender<EntityAction>,
     entity: Arc<Mutex<dyn EntityBounds>>,
     is_sound_active: Arc<AtomicBool>,
 }
 impl EntityActor {
-    pub fn new_with(
-        entity: impl EntityBounds + 'static,
-        action_sender: &Sender<EntityAction>,
-    ) -> Self {
+    #[allow(dead_code)]
+    pub fn new_with(entity: impl EntityBounds + 'static) -> Self {
         let uid = entity.uid();
-        Self::new_with_wrapped(uid, Arc::new(Mutex::new(entity)), action_sender)
+        Self::new_with_wrapped(uid, Arc::new(Mutex::new(entity)))
     }
 
-    pub fn new_with_wrapped(
-        uid: Uid,
-        entity: Arc<Mutex<dyn EntityBounds>>,
-        action_sender: &Sender<EntityAction>,
+    pub fn new_and_subscribe(
+        entity: impl EntityBounds + 'static,
+        sender: &Sender<EntityAction>,
     ) -> Self {
+        let uid = entity.uid();
+        let actor = Self::new_with_wrapped(uid, Arc::new(Mutex::new(entity)));
+        actor.send_request(EntityRequest::Subscribe(sender.clone()));
+        actor
+    }
+
+    pub fn new_with_wrapped(uid: Uid, entity: Arc<Mutex<dyn EntityBounds>>) -> Self {
         let r = Self {
             uid,
             request_channel_pair: Default::default(),
-            action_sender: action_sender.clone(),
             entity,
             is_sound_active: Default::default(),
         };
@@ -75,7 +80,7 @@ impl EntityActor {
 
     fn start_input_thread(&self) {
         let receiver = self.request_channel_pair.receiver.clone();
-        let sender = self.action_sender.clone();
+        let mut subscription: Subscription<EntityAction> = Default::default();
         let entity = Arc::clone(&self.entity);
         let mut buffer = GenerationBuffer::<StereoSample>::default();
         let is_sound_active = Arc::clone(&self.is_sound_active);
@@ -87,7 +92,7 @@ impl EntityActor {
                         if let Ok(mut entity) = entity.lock() {
                             let uid = entity.uid();
                             entity.handle_midi_message(channel, message, &mut |c, m| {
-                                let _ = sender.try_send(EntityAction::Midi(uid, c, m));
+                                subscription.broadcast(EntityAction::Midi(uid, c, m));
                             });
                         }
                     }
@@ -104,7 +109,7 @@ impl EntityActor {
                             entity.lock().unwrap().generate(buffer.buffer_mut()),
                             ATOMIC_ORDERING,
                         );
-                        let _ = sender.try_send(EntityAction::Frames(buffer.buffer().to_vec()));
+                        subscription.broadcast(EntityAction::Frames(buffer.buffer().to_vec()));
                     }
                     EntityRequest::Quit => {
                         break;
@@ -114,8 +119,7 @@ impl EntityActor {
                         buffer.resize(count);
                         buffer.buffer_mut().copy_from_slice(&frames);
                         entity.lock().unwrap().transform(buffer.buffer_mut());
-                        let _ =
-                            sender.try_send(EntityAction::Transformed(buffer.buffer().to_vec()));
+                        subscription.broadcast(EntityAction::Transformed(buffer.buffer().to_vec()));
                     }
                     EntityRequest::Work(time_range) => {
                         if let Ok(mut entity) = entity.lock() {
@@ -123,17 +127,23 @@ impl EntityActor {
                             entity.update_time_range(&time_range);
                             entity.work(&mut |event| match event {
                                 WorkEvent::Midi(channel, message) => {
-                                    let _ =
-                                        sender.try_send(EntityAction::Midi(uid, channel, message));
+                                    subscription
+                                        .broadcast(EntityAction::Midi(uid, channel, message));
                                 }
                                 WorkEvent::MidiForTrack(_, _, _) => {
                                     todo!("This might be obsolete or not applicable here")
                                 }
                                 WorkEvent::Control(value) => {
-                                    let _ = sender.try_send(EntityAction::Control(uid, value));
+                                    subscription.broadcast(EntityAction::Control(uid, value));
                                 }
                             });
                         }
+                    }
+                    EntityRequest::Subscribe(sender) => {
+                        subscription.subscribe(&sender);
+                    }
+                    EntityRequest::Unsubscribe(sender) => {
+                        subscription.unsubscribe(&sender);
                     }
                 }
             }
@@ -153,10 +163,6 @@ impl EntityActor {
     }
 }
 impl ProvidesActorService<EntityRequest, EntityAction> for EntityActor {
-    fn action_sender(&self) -> &Sender<EntityAction> {
-        &self.action_sender
-    }
-
     fn sender(&self) -> &Sender<EntityRequest> {
         &self.request_channel_pair.sender
     }

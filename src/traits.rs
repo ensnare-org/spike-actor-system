@@ -9,8 +9,9 @@ pub trait ProvidesService<I, E> {
 }
 
 pub trait ProvidesActorService<R, A> {
-    fn action_sender(&self) -> &Sender<A>;
+    /// Send side of channel for service requests.
     fn sender(&self) -> &Sender<R>;
+    /// Convenience method to send requests.
     fn send_request(&self, request: R) {
         let _ = self.sender().try_send(request);
     }

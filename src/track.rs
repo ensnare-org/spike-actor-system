@@ -4,6 +4,7 @@ use crate::{
     busy::BusyWaiter,
     entity::{EntityAction, EntityActor, EntityRequest},
     quietener::Quietener,
+    subscription::Subscription,
     traits::ProvidesActorService,
 };
 use crossbeam_channel::{Select, Sender};
@@ -17,6 +18,10 @@ use std::{
 
 #[derive(Debug)]
 pub enum TrackRequest {
+    /// Add a subscriber to our actions.
+    Subscribe(Sender<TrackAction>),
+    /// Remove a subscriber from our actions.
+    Unsubscribe(Sender<TrackAction>),
     /// The track should handle an incoming MIDI message.
     Midi(MidiChannel, MidiMessage),
     /// Broken - meaningless
@@ -25,33 +30,53 @@ pub enum TrackRequest {
     Work(TimeRange),
     /// The track should generate a buffer of audio frames.
     NeedsAudio(usize),
+    /// This track should consume the given track's output. All tracks,
+    /// including the master track, accept sends. An aux track is one whose
+    /// audio sources are only sends.
+    AddSend(TrackUid, Sender<TrackRequest>),
+    /// This track should stop consuming the given track's output.
+    RemoveSend(TrackUid),
     /// The [TrackActor] should exit.
     Quit,
-    AddSourceTrack(TrackUid, Sender<TrackRequest>),
-    RemoveSourceTrack(TrackUid),
 }
 
-#[derive(Debug)]
+/// The [Track] has produced some work that the parent should look at.
+#[derive(Debug, Clone)]
 pub enum TrackAction {
+    /// The [Track] has produced a MIDI message that should be considered for
+    /// routing elsewhere. The track has already routed it appropriately within
+    /// itself.
+    ///
+    /// TODO: replace with channels!
     Midi(MidiChannel, MidiMessage),
+    /// The [Entity] with the given [Uid] has produced the given signal that
+    /// should be handled. The track has already routed it appropriately within
+    /// itself (TODO - really? Doesn't that mean each track is keeping a table
+    /// of subscribers, in addition to the global one?).
+    ///
+    /// TODO: replace with channels!
     Control(Uid, ControlValue),
-    Frames(Vec<StereoSample>),
+    /// This track has produced a buffer of frames.
+    Frames(TrackUid, Vec<StereoSample>),
 }
 
 #[derive(Debug)]
 struct TrackActorStateMachine {
+    track_uid: TrackUid,
     state: TrackActorState,
     buffer: GenerationBuffer<StereoSample>,
     track: Arc<Mutex<Track>>,
-    sender: Sender<TrackAction>,
+    subscription: Subscription<TrackAction>,
 }
 impl TrackActorStateMachine {
-    fn new_with(track: &Arc<Mutex<Track>>, sender: &Sender<TrackAction>) -> Self {
+    fn new_with(track: &Arc<Mutex<Track>>) -> Self {
+        let track_uid = track.lock().unwrap().uid;
         Self {
+            track_uid,
             state: Default::default(),
             buffer: Default::default(),
             track: Arc::clone(&track),
-            sender: sender.clone(),
+            subscription: Default::default(),
         }
     }
     fn handle_entity_action(&mut self, action: EntityAction) {
@@ -62,7 +87,8 @@ impl TrackActorStateMachine {
                         let _ = actor.send(EntityRequest::Midi(channel, message));
                     }
                 }
-                let _ = self.sender.send(TrackAction::Midi(channel, message));
+                self.subscription
+                    .broadcast(TrackAction::Midi(channel, message));
             }
             EntityAction::Control(source_uid, value) => {
                 self.handle_control(source_uid, value);
@@ -77,22 +103,27 @@ impl TrackActorStateMachine {
     }
 
     fn handle_control(&mut self, source_uid: Uid, value: ControlValue) {
-        let _ = self.sender.send(TrackAction::Control(source_uid, value));
+        self.subscription
+            .broadcast(TrackAction::Control(source_uid, value));
     }
 
     fn handle_track_action(&mut self, action: TrackAction) {
         match action {
             TrackAction::Midi(channel, message) => {
-                let _ = self.sender.try_send(TrackAction::Midi(channel, message));
+                self.subscription
+                    .broadcast(TrackAction::Midi(channel, message));
             }
             TrackAction::Control(source_uid, value) => {
                 self.handle_control(source_uid, value);
             }
-            TrackAction::Frames(frames) => {
+            TrackAction::Frames(_track_uid, frames) => {
                 // TODO: if we're receiving this, then we might be a parent of a
                 // track that is waiting as an aux track for this frame. Think
                 // about how to represent that (and should the master track be
                 // using the same method?).
+
+                //                dddddddo this MAYBE WE GET THIS FOR FREE
+
                 self.handle_incoming_frames(frames);
             }
         }
@@ -161,9 +192,10 @@ impl TrackActorStateMachine {
 
     fn issue_outgoing_frames_action(&mut self) {
         self.state = TrackActorState::Idle;
-        let _ = self
-            .sender
-            .send(TrackAction::Frames(self.buffer.buffer().to_vec()));
+        self.subscription.broadcast(TrackAction::Frames(
+            self.track_uid,
+            self.buffer.buffer().to_vec(),
+        ));
     }
 
     fn handle_needs_audio(&mut self, count: usize) {
@@ -175,12 +207,12 @@ impl TrackActorStateMachine {
         self.buffer.resize(count);
         self.buffer.clear();
 
-        // if we have source tracks, kick them off as well as any instruments
+        // if we have source tracks, start them. Same for instruments.
         let mut have_nonzero_sources = false;
         if let Ok(track) = self.track.lock() {
-            let new_sources_count = track.source_tracks.len() + track.actors.len();
+            let new_sources_count = track.send_tracks.len() + track.actors.len();
             self.state = TrackActorState::AwaitingSources(new_sources_count);
-            for source in track.source_tracks.values() {
+            for source in track.send_tracks.values() {
                 let _ = source.try_send(TrackRequest::NeedsAudio(count));
             }
             for actor in track.actors.values() {
@@ -195,6 +227,14 @@ impl TrackActorStateMachine {
         } else {
             // Nothing to do now but wait for incoming Frames from our sources
         }
+    }
+
+    fn handle_subscribe(&mut self, sender: Sender<TrackAction>) {
+        self.subscription.subscribe(&sender);
+    }
+
+    fn handle_unsubscribe(&mut self, sender: Sender<TrackAction>) {
+        self.subscription.unsubscribe(&sender);
     }
 }
 
@@ -211,10 +251,6 @@ pub struct TrackActor {
     /// Receives requests.
     request_channel_pair: ChannelPair<TrackRequest>,
 
-    /// Reports its actions to this channel, which is typically owned by a
-    /// parent.
-    action_sender: Sender<TrackAction>,
-
     /// Receives entity actions.
     entity_action_channel_pair: ChannelPair<EntityAction>,
 
@@ -229,10 +265,6 @@ impl Displays for TrackActor {
     }
 }
 impl ProvidesActorService<TrackRequest, TrackAction> for TrackActor {
-    fn action_sender(&self) -> &Sender<TrackAction> {
-        &self.action_sender
-    }
-
     fn sender(&self) -> &Sender<TrackRequest> {
         &self.request_channel_pair.sender
     }
@@ -253,12 +285,12 @@ impl TrackActor {
         );
         let mut r = Self {
             request_channel_pair: Default::default(),
-            action_sender: sender.clone(),
             entity_action_channel_pair,
             track_action_channel_pair: Default::default(),
             inner: Arc::new(Mutex::new(track)),
         };
 
+        r.send_request(TrackRequest::Subscribe(sender.clone()));
         r.start_thread();
 
         r
@@ -269,7 +301,7 @@ impl TrackActor {
         let track = Arc::clone(&self.inner);
         let entity_receiver = self.entity_action_channel_pair.receiver.clone();
         let track_receiver = self.track_action_channel_pair.receiver.clone();
-        let mut state_machine = TrackActorStateMachine::new_with(&self.inner, &self.action_sender);
+        let mut state_machine = TrackActorStateMachine::new_with(&self.inner);
 
         std::thread::spawn(move || {
             let mut sel = Select::default();
@@ -319,15 +351,21 @@ impl TrackActor {
                                         }
                                     }
                                 }
-                                TrackRequest::AddSourceTrack(uid, sender) => {
+                                TrackRequest::AddSend(uid, sender) => {
                                     if let Ok(mut track) = track.lock() {
-                                        track.source_tracks.insert(uid, sender);
+                                        track.send_tracks.insert(uid, sender);
                                     }
                                 }
-                                TrackRequest::RemoveSourceTrack(uid) => {
+                                TrackRequest::RemoveSend(uid) => {
                                     if let Ok(mut track) = track.lock() {
-                                        track.source_tracks.remove(&uid);
+                                        track.send_tracks.remove(&uid);
                                     }
+                                }
+                                TrackRequest::Subscribe(sender) => {
+                                    state_machine.handle_subscribe(sender)
+                                }
+                                TrackRequest::Unsubscribe(sender) => {
+                                    state_machine.handle_unsubscribe(sender)
                                 }
                             }
                         }
@@ -363,7 +401,7 @@ struct Track {
     uid_factory: Arc<EntityUidFactory>,
     ordered_actor_uids: Vec<Uid>,
     actors: HashMap<Uid, EntityActor>,
-    source_tracks: HashMap<TrackUid, Sender<TrackRequest>>,
+    send_tracks: HashMap<TrackUid, Sender<TrackRequest>>,
 }
 impl Track {
     fn new_with(
@@ -379,7 +417,7 @@ impl Track {
             uid_factory: Arc::clone(uid_factory),
             ordered_actor_uids: Default::default(),
             actors: Default::default(),
-            source_tracks: Default::default(),
+            send_tracks: Default::default(),
         }
     }
 
@@ -391,7 +429,8 @@ impl Track {
 
     fn add_entity(&mut self, mut entity: impl EntityBounds + 'static) {
         entity.set_uid(self.uid_factory.mint_next());
-        self.add_actor(EntityActor::new_with(entity, &self.entity_action_sender))
+        let actor = EntityActor::new_and_subscribe(entity, &self.entity_action_sender);
+        self.add_actor(actor);
     }
 }
 

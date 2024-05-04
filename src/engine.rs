@@ -35,7 +35,7 @@ pub enum EngineServiceInput {
 
 #[derive(Debug)]
 pub enum EngineServiceEvent {
-    NewOrchestratress(Arc<Mutex<Engine>>),
+    NewEngine(Arc<Mutex<Engine>>),
     /// The engine produced a MIDI message.
     Midi(MidiChannel, MidiMessage),
 }
@@ -86,9 +86,7 @@ impl EngineService {
         let _ = self
             .event_channel_pair
             .sender
-            .try_send(EngineServiceEvent::NewOrchestratress(Arc::clone(
-                &self.engine,
-            )));
+            .try_send(EngineServiceEvent::NewEngine(Arc::clone(&self.engine)));
         let service_input_receiver = self.input_channel_pair.receiver.clone();
         let mut audio_queue: Option<Arc<ArrayQueue<StereoSample>>> = None;
 
@@ -155,7 +153,11 @@ impl EngineService {
                                 TrackAction::Control(index, value) => {
                                     todo!("route stuff across tracks {index} {value}?");
                                 }
-                                TrackAction::Frames(frames) => {
+                                TrackAction::Frames(_track_uid, frames) => {
+                                    // We don't care about track_uid because we
+                                    // know that only the master track sends us
+                                    // frames.
+
                                     let frames_len = frames.len();
                                     assert!(frames_len <= 64);
                                     if engine.lock().unwrap().handle_frames(&frames) {
@@ -324,9 +326,10 @@ impl Engine {
         self.buffer.clear();
 
         if self.ordered_track_uids.is_empty() {
-            let _ = self
-                .action_sender
-                .send(TrackAction::Frames(self.buffer.buffer().to_vec()));
+            let _ = self.action_sender.send(TrackAction::Frames(
+                self.master_track_info.track_uid,
+                self.buffer.buffer().to_vec(),
+            ));
         } else {
             // Figure out the time slice for this batch of frames.
             let time_range = self.transport.advance(count);
@@ -370,7 +373,7 @@ impl Engine {
             let _ = self
                 .master_track_info
                 .sender
-                .try_send(TrackRequest::AddSourceTrack(
+                .try_send(TrackRequest::AddSend(
                     track_uid,
                     track_actor.sender().clone(),
                 ));
@@ -386,7 +389,7 @@ impl Engine {
         let _ = self
             .master_track_info
             .sender
-            .try_send(TrackRequest::RemoveSourceTrack(uid));
+            .try_send(TrackRequest::RemoveSend(uid));
         if let Some(track) = self.tracks.get(&uid) {
             track.send_request(TrackRequest::Quit);
         }
