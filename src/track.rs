@@ -2,13 +2,14 @@ use crate::{
     always::AlwaysSame,
     arp::Arpeggiator,
     busy::BusyWaiter,
+    drone::DroneController,
     entity::{EntityAction, EntityActor, EntityRequest},
     quietener::Quietener,
     subscription::Subscription,
     traits::ProvidesActorService,
 };
 use crossbeam_channel::{Select, Sender};
-use eframe::egui::{Color32, Frame, Margin, Stroke};
+use eframe::egui::{ComboBox, Frame, Margin};
 use ensnare::prelude::*;
 use ensnare_toys::{ToyInstrument, ToySynth};
 use std::{
@@ -57,6 +58,7 @@ pub enum TrackAction {
     /// of subscribers, in addition to the global one?).
     ///
     /// TODO: replace with channels!
+    #[allow(dead_code)]
     Control(Uid, ControlValue),
     /// This track has produced a buffer of frames.
     Frames(TrackUid, Vec<StereoSample>),
@@ -105,8 +107,17 @@ impl TrackActorStateMachine {
     }
 
     fn handle_control(&mut self, source_uid: Uid, value: ControlValue) {
-        self.subscription
-            .broadcast(TrackAction::Control(source_uid, value));
+        if let Ok(track) = self.track.lock() {
+            if let Some(links) = track.control_links.get(&source_uid) {
+                for link in links {
+                    if let Some(actor) = track.actors.get(&link.uid) {
+                        actor.send_request(EntityRequest::Control(link.param, value));
+                    }
+                }
+            }
+        }
+        // self.subscription
+        //     .broadcast(TrackAction::Control(source_uid, value));
     }
 
     fn handle_track_action(&mut self, action: TrackAction) {
@@ -396,6 +407,13 @@ impl TrackActor {
 }
 
 #[derive(Debug)]
+struct ControllableItem {
+    name: String,
+    uid: Uid,
+    param: ControlIndex,
+}
+
+#[derive(Debug)]
 struct Track {
     uid: TrackUid,
     is_master_track: bool,
@@ -404,6 +422,9 @@ struct Track {
     ordered_actor_uids: Vec<Uid>,
     actors: HashMap<Uid, EntityActor>,
     send_tracks: HashMap<TrackUid, Sender<TrackRequest>>,
+
+    controllables: Vec<ControllableItem>,
+    control_links: HashMap<Uid, Vec<ControlLink>>,
 }
 impl Track {
     fn new_with(
@@ -420,11 +441,32 @@ impl Track {
             ordered_actor_uids: Default::default(),
             actors: Default::default(),
             send_tracks: Default::default(),
+            controllables: vec![ControllableItem {
+                name: "None".to_string(),
+                uid: Uid::default(),
+                param: ControlIndex(0),
+            }],
+            control_links: Default::default(),
         }
     }
 
     fn add_actor(&mut self, actor: EntityActor) {
         let uid = actor.uid();
+
+        if let Ok(entity) = actor.entity.lock() {
+            for i in 0..entity.control_index_count() {
+                self.controllables.push(ControllableItem {
+                    name: format!(
+                        "{}: {}",
+                        entity.name(),
+                        entity.control_name_for_index(i.into()).unwrap().to_string()
+                    ),
+                    uid: entity.uid(),
+                    param: i.into(),
+                })
+            }
+        }
+
         self.ordered_actor_uids.push(uid);
         self.actors.insert(uid, actor);
     }
@@ -434,12 +476,25 @@ impl Track {
         let actor = EntityActor::new_and_subscribe(entity, &self.entity_action_sender);
         self.add_actor(actor);
     }
+
+    fn remove_actor(&mut self, uid: Uid) {
+        self.actors.remove(&uid);
+        self.ordered_actor_uids.retain(|u| *u != uid);
+        self.controllables.retain(|c| c.uid != uid);
+    }
+
+    fn link(&mut self, source_uid: Uid, control_link: ControlLink) {
+        self.control_links
+            .entry(source_uid)
+            .or_default()
+            .push(control_link);
+    }
 }
 
 impl Displays for Track {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
         ui.heading(format!("Track {}", self.uid));
-        ui.horizontal_top(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if !self.is_master_track {
                 if ui.button("Add Synth").clicked() {
                     self.add_entity(ToySynth::default());
@@ -465,30 +520,63 @@ impl Displays for Track {
                 if ui.button("Add Quietener").clicked() {
                     self.add_entity(Quietener::default());
                 }
+                if ui.button("Add Drone").clicked() {
+                    self.add_entity(DroneController::default());
+                }
+                ui.end_row();
             }
+
             let mut actor_uid_to_remove = None;
+            let mut link_to_add = None;
             for &uid in self.ordered_actor_uids.iter() {
                 if let Some(actor) = self.actors.get_mut(&uid) {
                     ui.vertical(|ui| {
                         Frame::default()
                             .stroke(if actor.is_sound_active() {
-                                Stroke::new(2.0, Color32::YELLOW)
+                                ui.visuals().widgets.active.bg_stroke
                             } else {
-                                Stroke::default()
+                                ui.visuals().widgets.noninteractive.bg_stroke
                             })
                             .inner_margin(Margin::same(4.0))
-                            .show(ui, |ui| actor.ui(ui));
+                            .show(ui, |ui| {
+                                actor.ui(ui);
+                                ui.label("");
+                                if ui.button("Remove").clicked() {
+                                    actor_uid_to_remove = Some(uid);
+                                }
 
-                        if ui.button("Remove").clicked() {
-                            actor_uid_to_remove = Some(uid);
-                        }
+                                if !self.controllables.is_empty() {
+                                    let mut selected_index = 0;
+                                    if ComboBox::new(ui.next_auto_id(), "Controls")
+                                        .show_index(
+                                            ui,
+                                            &mut selected_index,
+                                            self.controllables.len(),
+                                            |i| self.controllables[i].name.clone(),
+                                        )
+                                        .changed()
+                                    {
+                                        if selected_index != 0 {
+                                            let link = &self.controllables[selected_index];
+                                            link_to_add = Some((
+                                                uid,
+                                                ControlLink {
+                                                    uid: link.uid,
+                                                    param: link.param,
+                                                },
+                                            ));
+                                        }
+                                    };
+                                }
+                            });
                     });
                 }
             }
             if let Some(actor_uid_to_remove) = actor_uid_to_remove {
-                self.actors.remove(&actor_uid_to_remove);
-                self.ordered_actor_uids
-                    .retain(|uid| *uid != actor_uid_to_remove);
+                self.remove_actor(actor_uid_to_remove);
+            }
+            if let Some((uid, control_link)) = link_to_add {
+                self.link(uid, control_link);
             }
         });
         ui.label("Coming soon!")

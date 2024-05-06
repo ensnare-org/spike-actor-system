@@ -155,8 +155,9 @@ impl EngineService {
                                     let _ = service_event_sender
                                         .send(EngineServiceEvent::Midi(channel, message));
                                 }
-                                TrackAction::Control(index, value) => {
-                                    todo!("route stuff across tracks {index} {value}?");
+                                TrackAction::Control(_index, _value) => {
+                                    // todo!("route stuff across tracks {index} {value}?");
+                                    // This should go away when we go 100% channels
                                 }
                                 TrackAction::Frames(_track_uid, frames) => {
                                     // We don't care about track_uid because we

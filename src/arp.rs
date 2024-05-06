@@ -1,9 +1,9 @@
 use derivative::Derivative;
 use ensnare::prelude::*;
-use ensnare_proc_macros::{IsEntity, Metadata};
+use ensnare_proc_macros::{Control, IsEntity, Metadata};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Derivative, IsEntity, Metadata, Serialize, Deserialize)]
+#[derive(Debug, Derivative, IsEntity, Control, Metadata, Serialize, Deserialize)]
 #[derivative(Default)]
 #[entity(TransformsAudio)]
 pub struct Arpeggiator {
@@ -40,7 +40,6 @@ impl Displays for Arpeggiator {
         ui.label(format!("Last beat: {}", self.last_beat))
     }
 }
-impl Controllable for Arpeggiator {}
 impl Controls for Arpeggiator {
     fn time_range(&self) -> Option<TimeRange> {
         Some(self.time_range.clone())

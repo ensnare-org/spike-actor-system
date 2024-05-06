@@ -117,6 +117,7 @@ use traits::ProvidesService;
 mod always;
 mod arp;
 mod busy;
+mod drone;
 mod engine;
 mod entity;
 mod quietener;

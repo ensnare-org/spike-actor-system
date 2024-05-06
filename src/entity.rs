@@ -48,7 +48,7 @@ pub enum EntityAction {
 pub struct EntityActor {
     uid: Uid,
     request_channel_pair: ChannelPair<EntityRequest>,
-    entity: Arc<Mutex<dyn EntityBounds>>,
+    pub(crate) entity: Arc<Mutex<dyn EntityBounds>>,
     is_sound_active: Arc<AtomicBool>,
 }
 impl EntityActor {
