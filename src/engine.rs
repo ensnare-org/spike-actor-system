@@ -295,10 +295,22 @@ impl Controls for Engine {
             fn work(&mut self, control_events_fn: &mut ControlEventsFn);
             fn is_finished(&self) -> bool;
             fn play(&mut self);
-            fn stop(&mut self);
             fn skip_to_start(&mut self);
             fn is_performing(&self) -> bool;
         }
+    }
+
+    fn stop(&mut self) {
+        self.transport.stop();
+        self.tracks.values().for_each(|track| {
+            track.send_request(TrackRequest::Midi(
+                MidiChannel::default(),
+                MidiMessage::Controller {
+                    controller: 123.into(),
+                    value: 0.into(),
+                },
+            ))
+        });
     }
 }
 impl Engine {
