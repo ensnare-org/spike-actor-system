@@ -1,3 +1,4 @@
+use eframe::egui::DragValue;
 use ensnare::prelude::*;
 use ensnare_proc_macros::{Control, IsEntity, Metadata};
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,12 @@ impl HandlesMidi for Quietener {}
 impl Configurable for Quietener {}
 impl Displays for Quietener {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
-        ui.label(format!("Quiet level: {:.2}", self.quiet_factor.0))
+        let mut v = self.quiet_factor.0;
+        let response = ui.add(DragValue::new(&mut v).prefix("Quiet level: "));
+        if response.changed() {
+            self.quiet_factor.0 = v;
+        }
+        response
     }
 }
 impl Quietener {
