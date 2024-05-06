@@ -20,14 +20,6 @@ impl<A: Clone> Subscription<A> {
         self.subscribers.retain(|s| !s.same_channel(sender));
     }
 
-    pub fn subscribers(&self) -> &[Sender<A>] {
-        &self.subscribers
-    }
-
-    pub fn subscribers_mut(&mut self) -> &mut Vec<Sender<A>> {
-        &mut self.subscribers
-    }
-
     pub fn broadcast(&self, action: A) {
         for sender in self.subscribers.iter() {
             let _ = sender.try_send(action.clone());

@@ -7,6 +7,7 @@ use std::sync::{atomic::AtomicBool, Arc, Mutex};
 pub enum EntityRequest {
     /// Add a subscriber to our actions.
     Subscribe(Sender<EntityAction>),
+    #[allow(dead_code)]
     /// Remove a subscriber from our actions.
     Unsubscribe(Sender<EntityAction>),
     /// The entity should handle this message (if it listens on this channel).

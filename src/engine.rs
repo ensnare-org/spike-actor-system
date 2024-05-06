@@ -25,8 +25,10 @@ pub enum EngineServiceInput {
     Midi(MidiChannel, MidiMessage),
     /// The audio interface needs more audio.
     NeedsAudio(usize),
+    #[allow(dead_code)]
     /// Start playing.
     Play,
+    #[allow(dead_code)]
     /// Stop playing.
     Stop,
     /// The client would like the service to exit.
@@ -100,12 +102,14 @@ impl EngineService {
             let mut sel = Select::default();
             let service_index = sel.recv(&service_input_receiver);
             let track_index = sel.recv(&track_action_receiver);
+
             loop {
-                let oper = sel.select();
+                let operation = sel.select();
                 let mut start_generation = false;
-                match oper.index() {
+                match operation.index() {
                     index if index == service_index => {
-                        if let Ok(input) = oper.recv(&service_input_receiver) {
+                        if let Ok(input) = Self::recv_operation(operation, &service_input_receiver)
+                        {
                             match input {
                                 EngineServiceInput::Reset(
                                     sample_rate,
@@ -144,7 +148,8 @@ impl EngineService {
                         }
                     }
                     index if index == track_index => {
-                        if let Ok(action) = oper.recv(&track_action_receiver) {
+                        if let Ok(action) = Self::recv_operation(operation, &track_action_receiver)
+                        {
                             match action {
                                 TrackAction::Midi(channel, message) => {
                                     let _ = service_event_sender

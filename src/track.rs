@@ -20,10 +20,12 @@ use std::{
 pub enum TrackRequest {
     /// Add a subscriber to our actions.
     Subscribe(Sender<TrackAction>),
+    #[allow(dead_code)]
     /// Remove a subscriber from our actions.
     Unsubscribe(Sender<TrackAction>),
     /// The track should handle an incoming MIDI message.
     Midi(MidiChannel, MidiMessage),
+    #[allow(dead_code)]
     /// Broken - meaningless
     Control(ControlIndex, ControlValue),
     /// The track should perform work for the given slice of time.
@@ -311,10 +313,10 @@ impl TrackActor {
             let track_index = sel.recv(&track_receiver);
 
             loop {
-                let oper = sel.select();
-                match oper.index() {
+                let operation = sel.select();
+                match operation.index() {
                     index if index == input_index => {
-                        if let Ok(request) = oper.recv(&input_receiver) {
+                        if let Ok(request) = Self::recv_operation(operation, &input_receiver) {
                             match request {
                                 TrackRequest::Midi(channel, message) => {
                                     if let Ok(track) = track.lock() {
@@ -371,12 +373,12 @@ impl TrackActor {
                         }
                     }
                     index if index == entity_index => {
-                        if let Ok(action) = oper.recv(&entity_receiver) {
+                        if let Ok(action) = Self::recv_operation(operation, &entity_receiver) {
                             state_machine.handle_entity_action(action);
                         }
                     }
                     index if index == track_index => {
-                        if let Ok(action) = oper.recv(&track_receiver) {
+                        if let Ok(action) = Self::recv_operation(operation, &track_receiver) {
                             state_machine.handle_track_action(action);
                         }
                     }

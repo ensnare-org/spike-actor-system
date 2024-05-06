@@ -6,6 +6,17 @@ pub trait ProvidesService<I, E> {
     fn send_input(&self, input: I) {
         let _ = self.sender().try_send(input);
     }
+
+    fn recv_operation<T>(
+        oper: crossbeam_channel::SelectedOperation,
+        r: &Receiver<T>,
+    ) -> Result<T, crossbeam_channel::RecvError> {
+        let input_result = oper.recv(r);
+        if let Err(e) = input_result {
+            eprintln!("While attempting to receive from {:?}: {}", *r, e);
+        }
+        input_result
+    }
 }
 
 pub trait ProvidesActorService<R, A> {
@@ -14,5 +25,16 @@ pub trait ProvidesActorService<R, A> {
     /// Convenience method to send requests.
     fn send_request(&self, request: R) {
         let _ = self.sender().try_send(request);
+    }
+
+    fn recv_operation<T>(
+        oper: crossbeam_channel::SelectedOperation,
+        r: &Receiver<T>,
+    ) -> Result<T, crossbeam_channel::RecvError> {
+        let input_result = oper.recv(r);
+        if let Err(e) = input_result {
+            eprintln!("While attempting to receive from {:?}: {}", *r, e);
+        }
+        input_result
     }
 }
