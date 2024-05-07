@@ -73,10 +73,8 @@ impl WavWriterService {
                     WavWriterInput::Frames(frames) => {
                         if let Some(writer) = writer.as_mut() {
                             frames.iter().for_each(|&f| {
-                                if !has_lead_in_ended {
-                                    if f != StereoSample::SILENCE {
-                                        has_lead_in_ended = true;
-                                    }
+                                if !has_lead_in_ended && f != StereoSample::SILENCE {
+                                    has_lead_in_ended = true;
                                 }
                                 if has_lead_in_ended {
                                     let _ = writer.write_sample(f.0 .0 as f32);

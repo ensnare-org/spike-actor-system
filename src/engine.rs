@@ -331,7 +331,7 @@ impl Engine {
     }
 
     fn handle_frames(&mut self, frames: &[StereoSample]) -> bool {
-        self.buffer.merge(&frames);
+        self.buffer.merge(frames);
 
         // We're complete because the engine has only a single source (the
         // master track), so if we got frames to handle, then that's all we're
@@ -385,7 +385,7 @@ impl Engine {
             self.master_track_info = TrackActorInfo {
                 track_uid,
                 sender: track_actor.sender().clone(),
-                action_sender: track_actor.child_track_action_sender().clone(),
+                action_sender: track_actor.action_sender().clone(),
             };
         } else {
             let _ = self
@@ -396,7 +396,7 @@ impl Engine {
                     track_actor.sender().clone(),
                 ));
         }
-        self.ordered_track_uids.push(track_uid.clone());
+        self.ordered_track_uids.push(track_uid);
         self.tracks.insert(track_uid, track_actor);
 
         Ok(track_uid)
@@ -431,10 +431,8 @@ impl Displays for Engine {
 
                 if track_uid == self.master_track_info.track_uid {
                     ui.add_enabled(false, Button::new("Master Track can't be deleted"));
-                } else {
-                    if ui.button(format!("Delete Track {}", track_uid)).clicked() {
-                        track_index_to_delete = Some(track_uid);
-                    };
+                } else if ui.button(format!("Delete Track {}", track_uid)).clicked() {
+                    track_index_to_delete = Some(track_uid);
                 }
             }
         }

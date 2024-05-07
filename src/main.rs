@@ -326,8 +326,8 @@ impl eframe::App for ActorSystemApp {
             }
             ui.separator();
             ui.heading("MIDI");
-            if !self.midi_input_ports.is_empty() {
-                if ComboBox::new(ui.next_auto_id(), "MIDI Input")
+            if !self.midi_input_ports.is_empty()
+                && ComboBox::new(ui.next_auto_id(), "MIDI Input")
                     .show_index(
                         ui,
                         &mut self.midi_input_selected,
@@ -335,15 +335,15 @@ impl eframe::App for ActorSystemApp {
                         |i| self.midi_input_ports[i].to_string(),
                     )
                     .changed()
-                {
-                    self.service_manager
-                        .send_input(ServiceInput::MidiInputPortSelected(
-                            self.midi_input_ports[self.midi_input_selected].clone(),
-                        ));
-                }
+            {
+                self.service_manager
+                    .send_input(ServiceInput::MidiInputPortSelected(
+                        self.midi_input_ports[self.midi_input_selected].clone(),
+                    ));
             }
-            if !self.midi_output_ports.is_empty() {
-                if ComboBox::new(ui.next_auto_id(), "MIDI Output")
+
+            if !self.midi_output_ports.is_empty()
+                && ComboBox::new(ui.next_auto_id(), "MIDI Output")
                     .show_index(
                         ui,
                         &mut self.midi_output_selected,
@@ -351,12 +351,11 @@ impl eframe::App for ActorSystemApp {
                         |i| self.midi_output_ports[i].to_string(),
                     )
                     .changed()
-                {
-                    self.service_manager
-                        .send_input(ServiceInput::MidiOutputPortSelected(
-                            self.midi_output_ports[self.midi_output_selected].clone(),
-                        ))
-                }
+            {
+                self.service_manager
+                    .send_input(ServiceInput::MidiOutputPortSelected(
+                        self.midi_output_ports[self.midi_output_selected].clone(),
+                    ))
             }
         });
         ctx.request_repaint_after(Duration::from_millis(100));

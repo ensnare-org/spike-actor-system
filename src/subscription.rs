@@ -22,7 +22,10 @@ impl<A: Clone> Subscription<A> {
 
     pub fn broadcast(&self, action: A) {
         for sender in self.subscribers.iter() {
-            let _ = sender.try_send(action.clone());
+            let r = sender.try_send(action.clone());
+            if let Err(e) = r {
+                eprintln!("While broadcasting: {e:?}");
+            }
         }
     }
 }

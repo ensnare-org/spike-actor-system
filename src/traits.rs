@@ -13,7 +13,10 @@ pub trait ProvidesService<I, E> {
     ) -> Result<T, crossbeam_channel::RecvError> {
         let input_result = oper.recv(r);
         if let Err(e) = input_result {
-            eprintln!("While attempting to receive from {:?}: {}", *r, e);
+            eprintln!(
+                "ProvidesService: While attempting to receive from {:?}: {}",
+                *r, e
+            );
         }
         input_result
     }
@@ -26,6 +29,9 @@ pub trait ProvidesActorService<R, A> {
     fn send_request(&self, request: R) {
         let _ = self.sender().try_send(request);
     }
+    /// Send side of action channel, which allows subscriptions to other
+    /// entities' actions.
+    fn action_sender(&self) -> &Sender<A>;
 
     fn recv_operation<T>(
         oper: crossbeam_channel::SelectedOperation,
@@ -33,7 +39,10 @@ pub trait ProvidesActorService<R, A> {
     ) -> Result<T, crossbeam_channel::RecvError> {
         let input_result = oper.recv(r);
         if let Err(e) = input_result {
-            eprintln!("While attempting to receive from {:?}: {}", *r, e);
+            eprintln!(
+                "ProvidesActorService: While attempting to receive from {:?}: {}",
+                *r, e
+            );
         }
         input_result
     }

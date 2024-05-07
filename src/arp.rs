@@ -66,15 +66,13 @@ impl Controls for Arpeggiator {
                 self.is_playing = false;
                 self.should_play_low_note = !self.should_play_low_note;
             }
-        } else {
-            if beat_changed {
-                self.note_we_are_playing = self.get_note_to_play();
-                control_events_fn(WorkEvent::Midi(
-                    MidiChannel::default(),
-                    MidiUtils::new_note_on(self.note_we_are_playing, 127),
-                ));
-                self.is_playing = true;
-            }
+        } else if beat_changed {
+            self.note_we_are_playing = self.get_note_to_play();
+            control_events_fn(WorkEvent::Midi(
+                MidiChannel::default(),
+                MidiUtils::new_note_on(self.note_we_are_playing, 127),
+            ));
+            self.is_playing = true;
         }
     }
 

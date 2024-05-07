@@ -8,6 +8,7 @@ use crate::{
     subscription::Subscription,
     traits::ProvidesActorService,
 };
+use anyhow::anyhow;
 use crossbeam_channel::{Select, Sender};
 use eframe::egui::{ComboBox, Frame, Margin};
 use ensnare::prelude::*;
@@ -79,20 +80,15 @@ impl TrackActorStateMachine {
             track_uid,
             state: Default::default(),
             buffer: Default::default(),
-            track: Arc::clone(&track),
+            track: Arc::clone(track),
             subscription: Default::default(),
         }
     }
+
     fn handle_entity_action(&mut self, action: EntityAction) {
         match action {
             EntityAction::Midi(uid, channel, message) => {
-                if let Ok(track) = self.track.lock() {
-                    for actor in track.actors.values().filter(|&a| a.uid() != uid) {
-                        let _ = actor.send(EntityRequest::Midi(channel, message));
-                    }
-                }
-                self.subscription
-                    .broadcast(TrackAction::Midi(channel, message));
+                self.handle_midi(uid, channel, message);
             }
             EntityAction::Control(source_uid, value) => {
                 self.handle_control(source_uid, value);
@@ -106,18 +102,19 @@ impl TrackActorStateMachine {
         }
     }
 
-    fn handle_control(&mut self, source_uid: Uid, value: ControlValue) {
+    fn handle_midi(&mut self, uid: Uid, channel: MidiChannel, message: MidiMessage) {
+        self.subscription
+            .broadcast(TrackAction::Midi(channel, message));
         if let Ok(track) = self.track.lock() {
-            if let Some(links) = track.control_links.get(&source_uid) {
-                for link in links {
-                    if let Some(actor) = track.actors.get(&link.uid) {
-                        actor.send_request(EntityRequest::Control(link.param, value));
-                    }
-                }
+            for actor in track.actors.values().filter(|&a| a.uid() != uid) {
+                actor.send(EntityRequest::Midi(channel, message));
             }
         }
-        // self.subscription
-        //     .broadcast(TrackAction::Control(source_uid, value));
+    }
+
+    fn handle_control(&mut self, source_uid: Uid, value: ControlValue) {
+        self.subscription
+            .broadcast(TrackAction::Control(source_uid, value));
     }
 
     fn handle_track_action(&mut self, action: TrackAction) {
@@ -281,6 +278,10 @@ impl ProvidesActorService<TrackRequest, TrackAction> for TrackActor {
     fn sender(&self) -> &Sender<TrackRequest> {
         &self.request_channel_pair.sender
     }
+
+    fn action_sender(&self) -> &Sender<TrackAction> {
+        &self.track_action_channel_pair.sender
+    }
 }
 impl TrackActor {
     pub fn new_with(
@@ -332,16 +333,14 @@ impl TrackActor {
                                 TrackRequest::Midi(channel, message) => {
                                     if let Ok(track) = track.lock() {
                                         for actor in track.actors.values() {
-                                            let _ =
-                                                actor.send(EntityRequest::Midi(channel, message));
+                                            actor.send(EntityRequest::Midi(channel, message));
                                         }
                                     }
                                 }
                                 TrackRequest::Control(index, value) => {
                                     if let Ok(track) = track.lock() {
                                         for actor in track.actors.values() {
-                                            let _ =
-                                                actor.send(EntityRequest::Control(index, value));
+                                            actor.send(EntityRequest::Control(index, value));
                                         }
                                     }
                                 }
@@ -351,7 +350,7 @@ impl TrackActor {
                                 TrackRequest::Quit => {
                                     if let Ok(track) = track.lock() {
                                         for actor in track.actors.values() {
-                                            let _ = actor.send(EntityRequest::Quit);
+                                            actor.send(EntityRequest::Quit);
                                         }
                                     }
                                     break;
@@ -359,8 +358,7 @@ impl TrackActor {
                                 TrackRequest::Work(time_range) => {
                                     if let Ok(track) = track.lock() {
                                         for actor in track.actors.values() {
-                                            let _ =
-                                                actor.send(EntityRequest::Work(time_range.clone()));
+                                            actor.send(EntityRequest::Work(time_range.clone()));
                                         }
                                     }
                                 }
@@ -394,15 +392,11 @@ impl TrackActor {
                         }
                     }
                     _ => {
-                        panic!()
+                        panic!("Unexpected select index")
                     }
                 }
             }
         });
-    }
-
-    pub fn child_track_action_sender(&self) -> &Sender<TrackAction> {
-        &self.track_action_channel_pair.sender
     }
 }
 
@@ -459,7 +453,7 @@ impl Track {
                     name: format!(
                         "{}: {}",
                         entity.name(),
-                        entity.control_name_for_index(i.into()).unwrap().to_string()
+                        entity.control_name_for_index(i.into()).unwrap()
                     ),
                     uid: entity.uid(),
                     param: i.into(),
@@ -483,11 +477,43 @@ impl Track {
         self.controllables.retain(|c| c.uid != uid);
     }
 
-    fn link(&mut self, source_uid: Uid, control_link: ControlLink) {
-        self.control_links
-            .entry(source_uid)
-            .or_default()
-            .push(control_link);
+    pub fn link(
+        &mut self,
+        source_uid: Uid,
+        target_uid: Uid,
+        index: ControlIndex,
+    ) -> anyhow::Result<()> {
+        if let Some(source) = self.actors.get(&source_uid) {
+            if let Some(target) = self.actors.get(&target_uid) {
+                source.send_request(EntityRequest::ControlSubscribe(
+                    target.action_sender().clone(),
+                ));
+                target.send_request(EntityRequest::ControlLinkAdd(source_uid, index));
+                self.control_links
+                    .entry(source_uid)
+                    .or_default()
+                    .push(ControlLink {
+                        uid: target_uid,
+                        param: index,
+                    });
+                return Ok(());
+            }
+        }
+        Err(anyhow!("Couldn't find both {source_uid} and {target_uid}"))
+    }
+
+    pub fn unlink(&mut self, source_uid: Uid, target_uid: Uid, index: ControlIndex) {
+        if let Some(source) = self.actors.get(&source_uid) {
+            if let Some(target) = self.actors.get(&target_uid) {
+                source.send_request(EntityRequest::ControlUnsubscribe(
+                    target.action_sender().clone(),
+                ));
+                target.send_request(EntityRequest::ControlLinkRemove(source_uid, index));
+                if let Some(links) = self.control_links.get_mut(&source_uid) {
+                    links.retain(|link| link.uid != target_uid && link.param != index);
+                }
+            }
+        }
     }
 }
 
@@ -528,6 +554,7 @@ impl Displays for Track {
 
             let mut actor_uid_to_remove = None;
             let mut link_to_add = None;
+            let mut link_to_remove = None;
             for &uid in self.ordered_actor_uids.iter() {
                 if let Some(actor) = self.actors.get_mut(&uid) {
                     ui.vertical(|ui| {
@@ -555,28 +582,65 @@ impl Displays for Track {
                                             |i| self.controllables[i].name.clone(),
                                         )
                                         .changed()
+                                        && selected_index != 0
                                     {
-                                        if selected_index != 0 {
-                                            let link = &self.controllables[selected_index];
-                                            link_to_add = Some((
-                                                uid,
-                                                ControlLink {
-                                                    uid: link.uid,
-                                                    param: link.param,
-                                                },
-                                            ));
-                                        }
+                                        let link = &self.controllables[selected_index];
+                                        link_to_add = Some((
+                                            uid,
+                                            ControlLink {
+                                                uid: link.uid,
+                                                param: link.param,
+                                            },
+                                        ));
                                     };
+                                }
+                                if let Some(links) = self.control_links.get(&uid) {
+                                    ui.label("This controls");
+                                    for link in links {
+                                        if ui
+                                            .button(format!(
+                                                "Uid #{}, Param #{}",
+                                                link.uid, link.param
+                                            ))
+                                            .clicked()
+                                        {
+                                            link_to_remove = Some((uid, *link));
+                                        }
+                                    }
                                 }
                             });
                     });
                 }
             }
             if let Some(actor_uid_to_remove) = actor_uid_to_remove {
+                if let Some(links) = self.control_links.get(&actor_uid_to_remove) {
+                    let links = links.clone();
+                    for link in links {
+                        self.unlink(actor_uid_to_remove, link.uid, link.param);
+                    }
+                }
+
+                let keys: Vec<Uid> = self.control_links.keys().map(|k| *k).collect();
+                for source_uid in keys {
+                    if let Some(links) = self.control_links.get(&source_uid) {
+                        let links = links.clone();
+                        for link in links {
+                            if link.uid == actor_uid_to_remove {
+                                self.unlink(source_uid, link.uid, link.param);
+                            }
+                        }
+                    }
+                }
+                if let Some(actor) = self.actors.get(&actor_uid_to_remove) {
+                    actor.send_request(EntityRequest::Quit);
+                }
                 self.remove_actor(actor_uid_to_remove);
             }
-            if let Some((uid, control_link)) = link_to_add {
-                self.link(uid, control_link);
+            if let Some((source_uid, control_link)) = link_to_add {
+                let _ = self.link(source_uid, control_link.uid, control_link.param);
+            }
+            if let Some((source_uid, control_link)) = link_to_remove {
+                self.unlink(source_uid, control_link.uid, control_link.param);
             }
         });
         ui.label("Coming soon!")
