@@ -24,7 +24,7 @@ impl<A: Clone> Subscription<A> {
         for sender in self.subscribers.iter() {
             let r = sender.try_send(action.clone());
             if let Err(e) = r {
-                eprintln!("While broadcasting: {e:?}");
+                eprintln!("Subscription: while broadcasting: {e:?}");
             }
         }
     }

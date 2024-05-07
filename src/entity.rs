@@ -254,7 +254,6 @@ impl EntityActor {
         message: MidiMessage,
         subscription: &Subscription<EntityAction>,
     ) {
-        println!("{}:{}", file!(), line!());
         if let Ok(mut entity) = entity.lock() {
             let uid = entity.uid();
             entity.handle_midi_message(channel, message, &mut |c, m| {

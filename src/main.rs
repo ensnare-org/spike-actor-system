@@ -246,12 +246,10 @@ impl ServiceManager {
                                     // TODO: blink activity.... (or get rid of this, because we sent it so we already know about it....)
                                 }
                                 MidiServiceEvent::InputPortsRefreshed(ports) => {
-                                    eprintln!("inputs: {ports:?}");
                                     let _ = sm_sender
                                         .try_send(ServiceEvent::MidiInputsRefreshed(ports));
                                 }
                                 MidiServiceEvent::OutputPortsRefreshed(ports) => {
-                                    eprintln!("outputs: {ports:?}");
                                     let _ = sm_sender
                                         .try_send(ServiceEvent::MidiOutputsRefreshed(ports));
                                 }
@@ -282,12 +280,10 @@ impl ServiceManager {
                                     break;
                                 }
                                 ServiceInput::MidiInputPortSelected(port) => {
-                                    println!("Selcting input {port:?}");
                                     let _ = midi_sender
                                         .try_send(MidiInterfaceServiceInput::SelectMidiInput(port));
                                 }
                                 ServiceInput::MidiOutputPortSelected(port) => {
-                                    println!("Selcting output {port:?}");
                                     let _ = midi_sender.try_send(
                                         MidiInterfaceServiceInput::SelectMidiOutput(port),
                                     );
@@ -295,7 +291,7 @@ impl ServiceManager {
                             }
                         }
                     }
-                    _ => panic!(),
+                    _ => panic!("ServiceManager: Unexpected select index"),
                 }
             }
         });
