@@ -3,7 +3,7 @@ use crate::{
     arp::Arpeggiator,
     busy::BusyWaiter,
     drone::DroneController,
-    entity::{EntityAction, EntityActor, EntityRequest},
+    entity::{ControlAction, EntityAction, EntityActor, EntityRequest, MidiAction},
     mixer::Mixer,
     quietener::Quietener,
     subscription::Subscription,
@@ -23,14 +23,10 @@ use std::{
 pub enum TrackRequest {
     /// Add a subscriber to our actions.
     Subscribe(Sender<TrackAction>),
-    #[allow(dead_code)]
     /// Remove a subscriber from our actions.
     Unsubscribe(Sender<TrackAction>),
     /// The track should handle an incoming MIDI message.
     Midi(MidiChannel, MidiMessage),
-    #[allow(dead_code)]
-    /// Broken - meaningless
-    Control(ControlIndex, ControlValue),
     /// The track should perform work for the given slice of time.
     Work(TimeRange),
     /// The track should generate a buffer of audio frames.
@@ -86,12 +82,6 @@ impl TrackActorStateMachine {
 
     fn handle_entity_action(&mut self, action: EntityAction) {
         match action {
-            EntityAction::Midi(uid, channel, message) => {
-                self.handle_midi(uid, channel, message);
-            }
-            EntityAction::Control(_source_uid, _value) => {
-                panic!("Track shouldn't receive a Control message because they don't subscribe to them.")
-            }
             EntityAction::Frames(frames) => {
                 self.handle_incoming_frames(frames);
             }
@@ -101,13 +91,17 @@ impl TrackActorStateMachine {
         }
     }
 
-    fn handle_midi(&mut self, uid: Uid, channel: MidiChannel, message: MidiMessage) {
+    fn handle_midi_action(&mut self, action: MidiAction) {
         self.subscription
-            .broadcast(TrackAction::Midi(channel, message));
+            .broadcast(TrackAction::Midi(action.channel, action.message));
         // TODO: opportunity to use direct channels?
         if let Ok(track) = self.track.lock() {
-            for actor in track.actors.values().filter(|&a| a.uid() != uid) {
-                actor.send(EntityRequest::Midi(channel, message));
+            for actor in track
+                .actors
+                .values()
+                .filter(|&a| a.uid() != action.source_uid)
+            {
+                actor.send(EntityRequest::Midi(action.channel, action.message));
             }
         }
     }
@@ -266,6 +260,12 @@ pub struct TrackActor {
     /// Receives entity actions.
     entity_action_channel_pair: ChannelPair<EntityAction>,
 
+    /// Receives MIDI actions.
+    midi_action_channel_pair: ChannelPair<MidiAction>,
+
+    /// Receives control actions.
+    control_action_channel_pair: ChannelPair<ControlAction>,
+
     /// Receives child track actions.
     track_action_channel_pair: ChannelPair<TrackAction>,
 
@@ -291,16 +291,26 @@ impl TrackActor {
         is_master_track: bool,
         uid_factory: &Arc<EntityUidFactory>,
     ) -> Self {
-        let entity_action_channel_pair = ChannelPair::<EntityAction>::default();
+        let entity_action_channel_pair: ChannelPair<EntityAction> = Default::default();
+        let midi_action_channel_pair: ChannelPair<MidiAction> = Default::default();
+        let control_action_channel_pair: ChannelPair<ControlAction> = Default::default();
+        let action_subscription_senders = ActionSubscriptionSenders {
+            entity: entity_action_channel_pair.sender.clone(),
+            midi: midi_action_channel_pair.sender.clone(),
+            control: control_action_channel_pair.sender.clone(),
+        };
+
         let track = Track::new_with(
             track_uid,
             is_master_track,
-            &entity_action_channel_pair.sender,
+            action_subscription_senders,
             uid_factory,
         );
         let mut r = Self {
             request_channel_pair: Default::default(),
             entity_action_channel_pair,
+            midi_action_channel_pair,
+            control_action_channel_pair,
             track_action_channel_pair: Default::default(),
             inner: Arc::new(Mutex::new(track)),
         };
@@ -314,6 +324,8 @@ impl TrackActor {
         let input_receiver = self.request_channel_pair.receiver.clone();
         let track = Arc::clone(&self.inner);
         let entity_receiver = self.entity_action_channel_pair.receiver.clone();
+        let midi_receiver = self.midi_action_channel_pair.receiver.clone();
+        let control_receiver = self.control_action_channel_pair.receiver.clone();
         let track_receiver = self.track_action_channel_pair.receiver.clone();
         let mut state_machine = TrackActorStateMachine::new_with(&self.inner);
 
@@ -322,6 +334,8 @@ impl TrackActor {
 
             let input_index = sel.recv(&input_receiver);
             let entity_index = sel.recv(&entity_receiver);
+            let midi_index = sel.recv(&midi_receiver);
+            let control_index = sel.recv(&control_receiver);
             let track_index = sel.recv(&track_receiver);
 
             loop {
@@ -335,13 +349,6 @@ impl TrackActor {
                                         track
                                             .entity_request_subscription
                                             .broadcast(EntityRequest::Midi(channel, message));
-                                    }
-                                }
-                                TrackRequest::Control(index, value) => {
-                                    if let Ok(track) = track.lock() {
-                                        track
-                                            .entity_request_subscription
-                                            .broadcast(EntityRequest::Control(index, value));
                                     }
                                 }
                                 TrackRequest::NeedsAudio(count) => {
@@ -389,6 +396,16 @@ impl TrackActor {
                             state_machine.handle_entity_action(action);
                         }
                     }
+                    index if index == midi_index => {
+                        if let Ok(action) = Self::recv_operation(operation, &midi_receiver) {
+                            state_machine.handle_midi_action(action)
+                        }
+                    }
+                    index if index == control_index => {
+                        if let Ok(_action) = Self::recv_operation(operation, &control_receiver) {
+                            panic!("For now, Tracks shouldn't receive Control messages")
+                        }
+                    }
                     index if index == track_index => {
                         if let Ok(action) = Self::recv_operation(operation, &track_receiver) {
                             state_machine.handle_track_action(action);
@@ -411,10 +428,16 @@ struct ControllableItem {
 }
 
 #[derive(Debug)]
+struct ActionSubscriptionSenders {
+    entity: Sender<EntityAction>,
+    midi: Sender<MidiAction>,
+    control: Sender<ControlAction>,
+}
+
+#[derive(Debug)]
 struct Track {
     uid: TrackUid,
     is_master_track: bool,
-    entity_action_sender: Sender<EntityAction>,
     uid_factory: Arc<EntityUidFactory>,
     ordered_actor_uids: Vec<Uid>,
     actors: HashMap<Uid, EntityActor>,
@@ -426,18 +449,19 @@ struct Track {
     control_links: HashMap<Uid, Vec<ControlLink>>,
 
     mixer: Option<Mixer>,
+
+    actor_subscription_senders: ActionSubscriptionSenders,
 }
 impl Track {
     fn new_with(
         uid: TrackUid,
         is_master_track: bool,
-        entity_action_sender: &Sender<EntityAction>,
+        actor_subscription_senders: ActionSubscriptionSenders,
         uid_factory: &Arc<EntityUidFactory>,
     ) -> Self {
         Self {
             uid,
             is_master_track,
-            entity_action_sender: entity_action_sender.clone(),
             uid_factory: Arc::clone(uid_factory),
             ordered_actor_uids: Default::default(),
             actors: Default::default(),
@@ -454,11 +478,27 @@ impl Track {
             } else {
                 None
             },
+            actor_subscription_senders,
         }
+    }
+
+    fn add_entity(&mut self, mut entity: impl EntityBounds + 'static) {
+        entity.set_uid(self.uid_factory.mint_next());
+        let actor = EntityActor::new_with(entity);
+        self.add_actor(actor);
     }
 
     fn add_actor(&mut self, actor: EntityActor) {
         let uid = actor.uid();
+        actor.send_request(EntityRequest::ActionSubscribe(
+            self.actor_subscription_senders.entity.clone(),
+        ));
+        actor.send_request(EntityRequest::MidiSubscribe(
+            self.actor_subscription_senders.midi.clone(),
+        ));
+
+        // Note: do not automatically subscribe Control, because that's
+        // point-to-point
 
         if let Ok(entity) = actor.entity.lock() {
             for i in 0..entity.control_index_count() {
@@ -479,18 +519,18 @@ impl Track {
         self.actors.insert(uid, actor);
     }
 
-    fn add_entity(&mut self, mut entity: impl EntityBounds + 'static) {
-        entity.set_uid(self.uid_factory.mint_next());
-        let actor = EntityActor::new_with(entity);
-        actor.send_request(EntityRequest::MidiSubscribe(
-            self.entity_action_sender.clone(),
-        ));
-        self.add_actor(actor);
-    }
-
     fn remove_actor(&mut self, uid: Uid) {
         if let Some(actor) = self.actors.get(&uid) {
             self.entity_request_subscription.unsubscribe(actor.sender());
+            actor.send_request(EntityRequest::ActionUnsubscribe(
+                self.actor_subscription_senders.entity.clone(),
+            ));
+            actor.send_request(EntityRequest::MidiUnsubscribe(
+                self.actor_subscription_senders.midi.clone(),
+            ));
+            actor.send_request(EntityRequest::ControlUnsubscribe(
+                self.actor_subscription_senders.control.clone(),
+            ));
         }
         self.actors.remove(&uid);
         self.ordered_actor_uids.retain(|u| *u != uid);
@@ -506,7 +546,7 @@ impl Track {
         if let Some(source) = self.actors.get(&source_uid) {
             if let Some(target) = self.actors.get(&target_uid) {
                 source.send_request(EntityRequest::ControlSubscribe(
-                    target.action_sender().clone(),
+                    target.control_sender().clone(),
                 ));
                 target.send_request(EntityRequest::ControlLinkAdd(source_uid, index));
                 self.control_links
@@ -526,7 +566,7 @@ impl Track {
         if let Some(source) = self.actors.get(&source_uid) {
             if let Some(target) = self.actors.get(&target_uid) {
                 source.send_request(EntityRequest::ControlUnsubscribe(
-                    target.action_sender().clone(),
+                    target.control_sender().clone(),
                 ));
                 target.send_request(EntityRequest::ControlLinkRemove(source_uid, index));
                 if let Some(links) = self.control_links.get_mut(&source_uid) {

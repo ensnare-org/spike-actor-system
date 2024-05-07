@@ -8,16 +8,18 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub enum EntityRequest {
+    /// Connect a receiver to this entity's action output.
+    ActionSubscribe(Sender<EntityAction>),
+    /// Disconnect a receiver from this entity's action output.
+    ActionUnsubscribe(Sender<EntityAction>),
     /// Connect a MIDI receiver to this entity's MIDI output.
-    MidiSubscribe(Sender<EntityAction>),
-    #[allow(dead_code)]
+    MidiSubscribe(Sender<MidiAction>),
     /// Disconnect a MIDI receiver from this entity's MIDI output.
-    MidiUnsubscribe(Sender<EntityAction>),
+    MidiUnsubscribe(Sender<MidiAction>),
     /// Link another entity to this entity's control output.
-    ControlSubscribe(Sender<EntityAction>),
-    #[allow(dead_code)]
+    ControlSubscribe(Sender<ControlAction>),
     /// Disconnect another entity from this entity's control output.
-    ControlUnsubscribe(Sender<EntityAction>),
+    ControlUnsubscribe(Sender<ControlAction>),
     /// Link this entity's controllable parameter to the specified source entity.
     ControlLinkAdd(Uid, ControlIndex),
     /// Unlink this entity's controllable parameter from the specified source entity.
@@ -46,14 +48,25 @@ pub enum EntityRequest {
 
 #[derive(Debug, Clone)]
 pub enum EntityAction {
-    /// The entity has emitted a MIDI message.
-    Midi(Uid, MidiChannel, MidiMessage),
-    /// The entity's signal has changed.
-    Control(Uid, ControlValue),
     /// The entity has produced a buffer of audio.
     Frames(Vec<StereoSample>),
     /// The entity has transformed a buffer of audio.
     Transformed(Vec<StereoSample>),
+}
+
+/// The entity has emitted a MIDI message.
+#[derive(Debug, Clone)]
+pub struct MidiAction {
+    pub(crate) source_uid: Uid,
+    pub(crate) channel: MidiChannel,
+    pub(crate) message: MidiMessage,
+}
+
+/// The entity's signal has changed.
+#[derive(Debug, Clone)]
+pub struct ControlAction {
+    pub(crate) source_uid: Uid,
+    pub(crate) value: ControlValue,
 }
 
 #[derive(Debug)]
@@ -61,8 +74,15 @@ pub struct EntityActor {
     /// Incoming requests to this entity.
     request_channel_pair: ChannelPair<EntityRequest>,
 
-    /// Receipient of this entity's actions.
+    /// If this entity subscribes to other entities, then it receives those
+    /// actions on this channel.
     action_channel_pair: ChannelPair<EntityAction>,
+
+    /// MIDI-in channel.
+    midi_channel_pair: ChannelPair<MidiAction>,
+
+    /// Control receiver channel.
+    control_channel_pair: ChannelPair<ControlAction>,
 
     /// A cached copy of entity's [Uid].
     uid: Uid,
@@ -83,6 +103,8 @@ impl EntityActor {
         let r = Self {
             request_channel_pair: Default::default(),
             action_channel_pair: Default::default(),
+            midi_channel_pair: Default::default(),
+            control_channel_pair: Default::default(),
             uid,
             entity,
             is_sound_active: Default::default(),
@@ -93,18 +115,24 @@ impl EntityActor {
 
     fn start_input_thread(&self) {
         let request_receiver = self.request_channel_pair.receiver.clone();
-        let mut midi_subscription: Subscription<EntityAction> = Default::default();
-        let mut control_links: Subscription<EntityAction> = Default::default();
+        let mut action_subscription: Subscription<EntityAction> = Default::default();
+        let mut midi_subscription: Subscription<MidiAction> = Default::default();
+        let mut control_subscription: Subscription<ControlAction> = Default::default();
+        // let mut control_links: Subscription<EntityAction> = Default::default();
         let mut source_uid_to_control_indexes: HashMap<Uid, Vec<ControlIndex>> = Default::default();
         let entity = Arc::clone(&self.entity);
         let mut buffer = GenerationBuffer::<StereoSample>::default();
         let is_sound_active = Arc::clone(&self.is_sound_active);
         let action_receiver = self.action_channel_pair.receiver.clone();
+        let midi_receiver = self.midi_channel_pair.receiver.clone();
+        let control_receiver = self.control_channel_pair.receiver.clone();
 
         std::thread::spawn(move || {
             let mut sel = Select::default();
             let request_index = sel.recv(&request_receiver);
             let action_index = sel.recv(&action_receiver);
+            let midi_index = sel.recv(&midi_receiver);
+            let control_index = sel.recv(&control_receiver);
 
             loop {
                 let operation = sel.select();
@@ -132,7 +160,7 @@ impl EntityActor {
                                     let is_active =
                                         entity.lock().unwrap().generate(buffer.buffer_mut());
                                     is_sound_active.store(is_active, ATOMIC_ORDERING);
-                                    midi_subscription
+                                    action_subscription
                                         .broadcast(EntityAction::Frames(buffer.buffer().to_vec()));
                                 }
                                 EntityRequest::Quit => {
@@ -143,7 +171,7 @@ impl EntityActor {
                                     buffer.resize(count);
                                     buffer.buffer_mut().copy_from_slice(&frames);
                                     entity.lock().unwrap().transform(buffer.buffer_mut());
-                                    midi_subscription.broadcast(EntityAction::Transformed(
+                                    action_subscription.broadcast(EntityAction::Transformed(
                                         buffer.buffer().to_vec(),
                                     ));
                                 }
@@ -153,9 +181,11 @@ impl EntityActor {
                                         entity.update_time_range(&time_range);
                                         entity.work(&mut |event| match event {
                                             WorkEvent::Midi(channel, message) => {
-                                                midi_subscription.broadcast(EntityAction::Midi(
-                                                    uid, channel, message,
-                                                ));
+                                                midi_subscription.broadcast(MidiAction {
+                                                    source_uid: uid,
+                                                    channel,
+                                                    message,
+                                                });
                                             }
                                             WorkEvent::MidiForTrack(_, _, _) => {
                                                 todo!(
@@ -163,11 +193,19 @@ impl EntityActor {
                                                 )
                                             }
                                             WorkEvent::Control(value) => {
-                                                control_links
-                                                    .broadcast(EntityAction::Control(uid, value));
+                                                control_subscription.broadcast(ControlAction {
+                                                    source_uid: uid,
+                                                    value,
+                                                });
                                             }
                                         });
                                     }
+                                }
+                                EntityRequest::ActionSubscribe(sender) => {
+                                    action_subscription.subscribe(&sender);
+                                }
+                                EntityRequest::ActionUnsubscribe(sender) => {
+                                    action_subscription.unsubscribe(&sender);
                                 }
                                 EntityRequest::MidiSubscribe(sender) => {
                                     midi_subscription.subscribe(&sender)
@@ -176,10 +214,10 @@ impl EntityActor {
                                     midi_subscription.unsubscribe(&sender)
                                 }
                                 EntityRequest::ControlSubscribe(sender) => {
-                                    control_links.subscribe(&sender)
+                                    control_subscription.subscribe(&sender)
                                 }
                                 EntityRequest::ControlUnsubscribe(sender) => {
-                                    control_links.unsubscribe(&sender)
+                                    control_subscription.unsubscribe(&sender)
                                 }
                                 EntityRequest::ControlLinkAdd(uid, index) => {
                                     source_uid_to_control_indexes
@@ -200,20 +238,31 @@ impl EntityActor {
                     index if index == action_index => {
                         if let Ok(action) = Self::recv_operation(operation, &action_receiver) {
                             match action {
-                                EntityAction::Midi(_uid, channel, message) => {
-                                    Self::handle_midi(&entity, channel, message, &midi_subscription)
-                                }
-                                EntityAction::Control(uid, value) => {
-                                    if let Some(indexes) = source_uid_to_control_indexes.get(&uid) {
-                                        if let Ok(mut entity) = entity.lock() {
-                                            for &index in indexes {
-                                                entity.control_set_param_by_index(index, value)
-                                            }
-                                        }
-                                    }
-                                }
                                 EntityAction::Frames(_) => panic!("this shouldn't happen"),
                                 EntityAction::Transformed(_) => panic!("this shouldn't happen"),
+                            }
+                        }
+                    }
+                    index if index == midi_index => {
+                        if let Ok(action) = Self::recv_operation(operation, &midi_receiver) {
+                            Self::handle_midi(
+                                &entity,
+                                action.channel,
+                                action.message,
+                                &midi_subscription,
+                            )
+                        }
+                    }
+                    index if index == control_index => {
+                        if let Ok(action) = Self::recv_operation(operation, &control_receiver) {
+                            if let Some(indexes) =
+                                source_uid_to_control_indexes.get(&action.source_uid)
+                            {
+                                if let Ok(mut entity) = entity.lock() {
+                                    for &index in indexes {
+                                        entity.control_set_param_by_index(index, action.value)
+                                    }
+                                }
                             }
                         }
                     }
@@ -241,14 +290,22 @@ impl EntityActor {
         entity: &Arc<Mutex<dyn EntityBounds>>,
         channel: MidiChannel,
         message: MidiMessage,
-        subscription: &Subscription<EntityAction>,
+        subscription: &Subscription<MidiAction>,
     ) {
         if let Ok(mut entity) = entity.lock() {
             let uid = entity.uid();
             entity.handle_midi_message(channel, message, &mut |c, m| {
-                subscription.broadcast(EntityAction::Midi(uid, c, m));
+                subscription.broadcast(MidiAction {
+                    source_uid: uid,
+                    channel: c,
+                    message: m,
+                });
             });
         }
+    }
+
+    pub(crate) fn control_sender(&self) -> &Sender<ControlAction> {
+        &self.control_channel_pair.sender
     }
 }
 

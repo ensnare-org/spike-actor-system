@@ -355,8 +355,11 @@ impl Engine {
     fn delete_track(&mut self, uid: TrackUid) {
         self.master_track
             .send_request(TrackRequest::RemoveSend(uid));
-        if let Some(track) = self.tracks.get(&uid) {
-            track.send_request(TrackRequest::Quit);
+        if let Some(track_actor) = self.tracks.get(&uid) {
+            track_actor.send_request(TrackRequest::Unsubscribe(
+                self.master_track.action_sender().clone(),
+            ));
+            track_actor.send_request(TrackRequest::Quit);
         }
         self.ordered_track_uids.retain(|t| *t != uid);
         self.tracks.remove(&uid);
