@@ -68,10 +68,11 @@ impl ProvidesService<EngineServiceInput, EngineServiceEvent> for EngineService {
 impl EngineService {
     pub fn new() -> Self {
         let track_action_channel_pair: ChannelPair<TrackAction> = Default::default();
+        let mut engine = Engine::new();
+        engine.subscribe(&track_action_channel_pair.sender);
+
         let r = Self {
-            engine: Arc::new(Mutex::new(Engine::new_with(
-                &track_action_channel_pair.sender,
-            ))),
+            engine: Arc::new(Mutex::new(engine)),
             input_channel_pair: Default::default(),
             event_channel_pair: Default::default(),
             track_action_channel_pair,
@@ -239,7 +240,7 @@ impl Default for TrackActorInfo {
 
 #[derive(Debug)]
 pub struct Engine {
-    action_sender: Sender<TrackAction>,
+    action_subscription: Subscription<TrackAction>,
     c: Configurables,
     buffer: GenerationBuffer<StereoSample>,
 
@@ -302,21 +303,19 @@ impl Controls for Engine {
 
     fn stop(&mut self) {
         self.transport.stop();
-        self.tracks.values().for_each(|track| {
-            track.send_request(TrackRequest::Midi(
-                MidiChannel::default(),
-                MidiMessage::Controller {
-                    controller: 123.into(),
-                    value: 0.into(),
-                },
-            ))
-        });
+        self.track_subscription.broadcast(TrackRequest::Midi(
+            MidiChannel::default(),
+            MidiMessage::Controller {
+                controller: 123.into(),
+                value: 0.into(),
+            },
+        ));
     }
 }
 impl Engine {
-    pub fn new_with(action_sender: &Sender<TrackAction>) -> Self {
+    pub fn new() -> Self {
         let mut r = Self {
-            action_sender: action_sender.clone(),
+            action_subscription: Default::default(),
             c: Default::default(),
             buffer: Default::default(),
             ordered_track_uids: Default::default(),
@@ -329,6 +328,13 @@ impl Engine {
         };
         let _ = r.create_track();
         r
+    }
+
+    fn subscribe(&mut self, sender: &Sender<TrackAction>) {
+        let _ = self
+            .master_track_info
+            .sender
+            .try_send(TrackRequest::Subscribe(sender.clone()));
     }
 
     fn handle_frames(&mut self, frames: &[StereoSample]) -> bool {
@@ -345,7 +351,7 @@ impl Engine {
         self.buffer.clear();
 
         if self.ordered_track_uids.is_empty() {
-            let _ = self.action_sender.send(TrackAction::Frames(
+            let _ = self.action_subscription.broadcast(TrackAction::Frames(
                 self.master_track_info.track_uid,
                 self.buffer.buffer().to_vec(),
             ));
@@ -367,19 +373,17 @@ impl Engine {
 
     fn create_track(&mut self) -> anyhow::Result<TrackUid> {
         let track_uid = self.track_uid_factory.mint_next();
-        let create_master_track = self.master_track_info.is_default();
+        let is_master_track = self.master_track_info.is_default();
 
-        let track_actor = TrackActor::new_with(
-            track_uid,
-            create_master_track,
-            if create_master_track {
-                &self.action_sender
-            } else {
-                &self.master_track_info.action_sender
-            },
-            &self.entity_uid_factory,
-        );
-        if create_master_track {
+        let track_actor =
+            TrackActor::new_with(track_uid, is_master_track, &self.entity_uid_factory);
+        if !is_master_track {
+            track_actor.send_request(TrackRequest::Subscribe(
+                self.master_track_info.action_sender.clone(),
+            ));
+        }
+
+        if is_master_track {
             self.master_track_info = TrackActorInfo {
                 track_uid,
                 sender: track_actor.sender().clone(),

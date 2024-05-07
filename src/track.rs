@@ -264,7 +264,6 @@ impl TrackActor {
     pub fn new_with(
         track_uid: TrackUid,
         is_master_track: bool,
-        sender: &Sender<TrackAction>,
         uid_factory: &Arc<EntityUidFactory>,
     ) -> Self {
         let entity_action_channel_pair = ChannelPair::<EntityAction>::default();
@@ -281,7 +280,6 @@ impl TrackActor {
             inner: Arc::new(Mutex::new(track)),
         };
 
-        r.send_request(TrackRequest::Subscribe(sender.clone()));
         r.start_thread();
 
         r
