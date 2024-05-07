@@ -392,6 +392,7 @@ impl Displays for Engine {
                 }
             }
         }
+        ui.separator();
         self.master_track.ui(ui);
 
         if let Some(uid) = track_index_to_delete {

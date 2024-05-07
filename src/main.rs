@@ -120,6 +120,7 @@ mod busy;
 mod drone;
 mod engine;
 mod entity;
+mod mixer;
 mod quietener;
 mod subscription;
 mod track;

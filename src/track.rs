@@ -4,6 +4,7 @@ use crate::{
     busy::BusyWaiter,
     drone::DroneController,
     entity::{EntityAction, EntityActor, EntityRequest},
+    mixer::Mixer,
     quietener::Quietener,
     subscription::Subscription,
     traits::ProvidesActorService,
@@ -60,6 +61,7 @@ pub enum TrackAction {
 #[derive(Debug)]
 struct TrackActorStateMachine {
     track_uid: TrackUid,
+    is_master_track: bool,
     state: TrackActorState,
     buffer: GenerationBuffer<StereoSample>,
     track: Arc<Mutex<Track>>,
@@ -67,9 +69,14 @@ struct TrackActorStateMachine {
 }
 impl TrackActorStateMachine {
     fn new_with(track: &Arc<Mutex<Track>>) -> Self {
-        let track_uid = track.lock().unwrap().uid;
+        let (track_uid, is_master_track) = {
+            let track = track.lock().unwrap();
+            (track.uid, track.is_master_track)
+        };
+
         Self {
             track_uid,
+            is_master_track,
             state: Default::default(),
             buffer: Default::default(),
             track: Arc::clone(track),
@@ -111,8 +118,12 @@ impl TrackActorStateMachine {
                 self.subscription
                     .broadcast(TrackAction::Midi(channel, message));
             }
-            TrackAction::Frames(_track_uid, frames) => {
-                self.handle_incoming_frames(frames);
+            TrackAction::Frames(track_uid, frames) => {
+                if self.track.lock().unwrap().mixer.is_some() {
+                    self.handle_incoming_track_frames(track_uid, frames);
+                } else {
+                    self.handle_incoming_frames(frames);
+                }
             }
         }
     }
@@ -133,6 +144,19 @@ impl TrackActorStateMachine {
                 self.advance_state_awaiting_effect();
             }
         }
+    }
+
+    fn handle_incoming_track_frames(&mut self, track_uid: TrackUid, frames: Vec<StereoSample>) {
+        assert!(frames.len() <= 64);
+        assert!(matches!(self.state, TrackActorState::AwaitingSources(..)));
+        assert!(self.is_master_track);
+
+        if let Ok(track) = self.track.lock() {
+            if let Some(mixer) = track.mixer.as_ref() {
+                mixer.mix(track_uid, &frames, self.buffer.buffer_mut());
+            }
+        }
+        self.advance_state_awaiting_sources();
     }
 
     fn advance_state_awaiting_sources(&mut self) {
@@ -341,6 +365,9 @@ impl TrackActor {
                                 TrackRequest::AddSend(uid, sender) => {
                                     if let Ok(mut track) = track.lock() {
                                         track.send_tracks.insert(uid, sender);
+                                        if let Some(mixer) = track.mixer.as_mut() {
+                                            mixer.add_track(uid);
+                                        }
                                     }
                                 }
                                 TrackRequest::RemoveSend(uid) => {
@@ -397,6 +424,8 @@ struct Track {
 
     controllables: Vec<ControllableItem>,
     control_links: HashMap<Uid, Vec<ControlLink>>,
+
+    mixer: Option<Mixer>,
 }
 impl Track {
     fn new_with(
@@ -420,6 +449,11 @@ impl Track {
                 param: ControlIndex(0),
             }],
             control_links: Default::default(),
+            mixer: if is_master_track {
+                Some(Mixer::default())
+            } else {
+                None
+            },
         }
     }
 
@@ -631,6 +665,9 @@ impl Displays for Track {
             }
             if let Some((source_uid, control_link)) = link_to_remove {
                 self.unlink(source_uid, control_link.uid, control_link.param);
+            }
+            if let Some(mixer) = self.mixer.as_mut() {
+                mixer.ui(ui);
             }
         });
         response
