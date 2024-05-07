@@ -497,7 +497,11 @@ impl Track {
 
 impl Displays for Track {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
-        ui.heading(format!("Track {}", self.uid));
+        let response = if self.is_master_track {
+            ui.heading(format!("Master Track"))
+        } else {
+            ui.heading(format!("Track {}", self.uid))
+        };
         ui.horizontal_wrapped(|ui| {
             if !self.is_master_track {
                 if ui.button("Add Synth").clicked() {
@@ -621,6 +625,6 @@ impl Displays for Track {
                 self.unlink(source_uid, control_link.uid, control_link.param);
             }
         });
-        ui.label("Coming soon!")
+        response
     }
 }

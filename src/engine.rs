@@ -7,7 +7,6 @@ use crate::{
 use crossbeam_channel::{Select, Sender};
 use crossbeam_queue::ArrayQueue;
 use delegate::delegate;
-use eframe::egui::Button;
 use ensnare::{
     orchestration::TrackUidFactory, prelude::*, traits::MidiNoteLabelMetadata, types::AudioQueue,
 };
@@ -171,32 +170,38 @@ impl EngineService {
 
                                     let frames_len = frames.len();
                                     assert!(frames_len <= 64);
-                                    if engine.lock().unwrap().handle_frames(&frames) {
-                                        let frames_len = frames.len();
+                                    let frames_len = frames.len();
 
-                                        if let Some(queue) = audio_queue.as_ref() {
-                                            for &frame in frames.iter() {
-                                                if queue.force_push(frame).is_some() {
-                                                    eprintln!("FYI force_push queue len/cap {}/{}, frames {}", queue.len(), queue.capacity(), frames_requested);
-                                                }
+                                    if let Some(queue) = audio_queue.as_ref() {
+                                        for &frame in frames.iter() {
+                                            if queue.force_push(frame).is_some() {
+                                                eprintln!(
+                                                    "FYI force_push queue len/cap {}/{}, frames {}",
+                                                    queue.len(),
+                                                    queue.capacity(),
+                                                    frames_requested
+                                                );
                                             }
                                         }
-                                        writer_service.send_input(WavWriterInput::Frames(frames));
+                                    }
+                                    writer_service.send_input(WavWriterInput::Frames(frames));
 
-                                        assert!(frames_len <= 64);
-                                        if frames_requested > frames_len {
-                                            // We still have work to do, so kick off generation once again.
-                                            frames_requested -= frames_len;
-                                            start_generation = true;
-                                        } else {
-                                            // The case of (frames_requested < frames_len) can
-                                            // happen because we always generate 64 frames at
-                                            // once, even if the request is for fewer than that.
-                                            // This ends up adding as many as 63 extra frames to
-                                            // the audio queue, but we know we'll be needing it
-                                            // soon, so it's OK.
-                                            frames_requested = 0;
-                                        }
+                                    assert!(frames_len <= 64);
+                                    if frames_requested > frames_len {
+                                        // We still have work to do, so kick off
+                                        // generation once again.
+                                        frames_requested -= frames_len;
+                                        start_generation = true;
+                                    } else {
+                                        // The case of (frames_requested <
+                                        // frames_len) can happen because we
+                                        // always generate 64 frames at once,
+                                        // even if the request is for fewer than
+                                        // that. This ends up adding as many as
+                                        // 63 extra frames to the audio queue,
+                                        // but we know we'll be needing it soon,
+                                        // so it's OK.
+                                        frames_requested = 0;
                                     }
                                 }
                             }
@@ -216,44 +221,17 @@ impl EngineService {
 }
 
 #[derive(Debug)]
-struct TrackActorInfo {
-    pub track_uid: TrackUid,
-    pub sender: Sender<TrackRequest>,
-    pub action_sender: Sender<TrackAction>,
-}
-impl TrackActorInfo {
-    fn is_default(&self) -> bool {
-        self.track_uid == TrackUid(0)
-    }
-}
-impl Default for TrackActorInfo {
-    fn default() -> Self {
-        let dummy_request_channel = ChannelPair::<TrackRequest>::default();
-        let dummy_action_channel = ChannelPair::<TrackAction>::default();
-        Self {
-            track_uid: TrackUid(0), // Hack: this is an invalid uid
-            sender: dummy_request_channel.sender.clone(),
-            action_sender: dummy_action_channel.sender.clone(),
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct Engine {
-    action_subscription: Subscription<TrackAction>,
-    c: Configurables,
-    buffer: GenerationBuffer<StereoSample>,
-
+    master_track: TrackActor,
     ordered_track_uids: Vec<TrackUid>,
     tracks: HashMap<TrackUid, TrackActor>,
     track_uid_factory: Arc<TrackUidFactory>,
     entity_uid_factory: Arc<EntityUidFactory>,
 
-    master_track_info: TrackActorInfo,
+    track_subscription: Subscription<TrackRequest>,
 
     transport: Transport,
-
-    track_subscription: Subscription<TrackRequest>,
+    c: Configurables,
 }
 impl Configurable for Engine {
     delegate! {
@@ -314,90 +292,59 @@ impl Controls for Engine {
 }
 impl Engine {
     pub fn new() -> Self {
+        let entity_uid_factory: Arc<EntityUidFactory> = Default::default();
+        let master_track = TrackActor::new_with(TrackUid::default(), true, &entity_uid_factory);
+        let master_track_request = master_track.sender().clone();
+
         let mut r = Self {
-            action_subscription: Default::default(),
-            c: Default::default(),
-            buffer: Default::default(),
+            master_track,
             ordered_track_uids: Default::default(),
             tracks: Default::default(),
             track_uid_factory: Default::default(),
-            master_track_info: Default::default(),
-            transport: Default::default(),
-            entity_uid_factory: Default::default(),
+            entity_uid_factory,
             track_subscription: Default::default(),
+            transport: Default::default(),
+            c: Default::default(),
         };
-        let _ = r.create_track();
+        r.track_subscription.subscribe(&master_track_request);
         r
     }
 
     fn subscribe(&mut self, sender: &Sender<TrackAction>) {
-        let _ = self
-            .master_track_info
-            .sender
-            .try_send(TrackRequest::Subscribe(sender.clone()));
-    }
-
-    fn handle_frames(&mut self, frames: &[StereoSample]) -> bool {
-        self.buffer.merge(frames);
-
-        // We're complete because the engine has only a single source (the
-        // master track), so if we got frames to handle, then that's all we're
-        // going to get.
-        true
+        // The master track produces all the actions that we would publish, so
+        // we delegate the subscription request to it.
+        self.master_track
+            .send_request(TrackRequest::Subscribe(sender.clone()));
     }
 
     fn start_generation(&mut self, count: usize) {
-        self.buffer.resize(count);
-        self.buffer.clear();
+        // Figure out the time slice for this batch of frames.
+        let time_range = self.transport.advance(count);
 
-        if self.ordered_track_uids.is_empty() {
-            let _ = self.action_subscription.broadcast(TrackAction::Frames(
-                self.master_track_info.track_uid,
-                self.buffer.buffer().to_vec(),
-            ));
-        } else {
-            // Figure out the time slice for this batch of frames.
-            let time_range = self.transport.advance(count);
+        // Ask tracks to do their time-based work.
+        self.track_subscription
+            .broadcast(TrackRequest::Work(time_range));
 
-            // Ask tracks to do their time-based work.
-            self.track_subscription
-                .broadcast(TrackRequest::Work(time_range));
-
-            // Ask master track for next buffer of frames.
-            let _ = self
-                .master_track_info
-                .sender
-                .send(TrackRequest::NeedsAudio(count));
-        }
+        // Ask master track for next buffer of frames.
+        self.master_track
+            .send_request(TrackRequest::NeedsAudio(count));
     }
 
     fn create_track(&mut self) -> anyhow::Result<TrackUid> {
         let track_uid = self.track_uid_factory.mint_next();
-        let is_master_track = self.master_track_info.is_default();
+        let is_master_track = false;
 
         let track_actor =
             TrackActor::new_with(track_uid, is_master_track, &self.entity_uid_factory);
-        if !is_master_track {
-            track_actor.send_request(TrackRequest::Subscribe(
-                self.master_track_info.action_sender.clone(),
-            ));
-        }
+        track_actor.send_request(TrackRequest::Subscribe(
+            self.master_track.action_sender().clone(),
+        ));
 
-        if is_master_track {
-            self.master_track_info = TrackActorInfo {
-                track_uid,
-                sender: track_actor.sender().clone(),
-                action_sender: track_actor.action_sender().clone(),
-            };
-        } else {
-            let _ = self
-                .master_track_info
-                .sender
-                .try_send(TrackRequest::AddSend(
-                    track_uid,
-                    track_actor.sender().clone(),
-                ));
-        }
+        self.master_track.send_request(TrackRequest::AddSend(
+            track_uid,
+            track_actor.sender().clone(),
+        ));
+
         self.track_subscription.subscribe(track_actor.sender());
         self.ordered_track_uids.push(track_uid);
         self.tracks.insert(track_uid, track_actor);
@@ -406,11 +353,8 @@ impl Engine {
     }
 
     fn delete_track(&mut self, uid: TrackUid) {
-        assert!(uid != self.master_track_info.track_uid);
-        let _ = self
-            .master_track_info
-            .sender
-            .try_send(TrackRequest::RemoveSend(uid));
+        self.master_track
+            .send_request(TrackRequest::RemoveSend(uid));
         if let Some(track) = self.tracks.get(&uid) {
             track.send_request(TrackRequest::Quit);
         }
@@ -424,35 +368,34 @@ impl Engine {
 }
 impl Displays for Engine {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
+        ui.horizontal_top(|ui| {
+            if ui.button("Play").clicked() {
+                self.play();
+            }
+            if ui.button("Stop").clicked() {
+                self.stop();
+            }
+            if ui.button("Add track").clicked() {
+                let _ = self.create_track();
+            }
+        });
+        let response = ui.separator();
+
         let mut track_index_to_delete = None;
 
         for &track_uid in self.ordered_track_uids.iter() {
             if let Some(track) = self.tracks.get_mut(&track_uid) {
                 track.ui(ui);
 
-                if track_uid == self.master_track_info.track_uid {
-                    ui.add_enabled(false, Button::new("Master Track can't be deleted"));
-                } else if ui.button(format!("Delete Track {}", track_uid)).clicked() {
+                if ui.button(format!("Delete Track {}", track_uid)).clicked() {
                     track_index_to_delete = Some(track_uid);
                 }
             }
         }
+        self.master_track.ui(ui);
 
         if let Some(uid) = track_index_to_delete {
             self.delete_track(uid);
-        }
-        ui.separator();
-        if ui.button("Add track").clicked() {
-            let _ = self.create_track();
-        }
-
-        let response = ui.separator();
-
-        if ui.button("Play").clicked() {
-            self.play();
-        }
-        if ui.button("Stop").clicked() {
-            self.stop();
         }
 
         response
