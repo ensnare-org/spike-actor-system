@@ -161,7 +161,7 @@ impl EngineService {
                                     // every track (maybe it's a feature to
                                     // switch on/off per track).
                                     let _ = service_event_sender
-                                        .send(EngineServiceEvent::Midi(channel, message));
+                                        .try_send(EngineServiceEvent::Midi(channel, message));
                                 }
                                 TrackAction::Frames(_track_uid, frames) => {
                                     // We don't care about track_uid because we
@@ -291,7 +291,7 @@ impl Controls for Engine {
     }
 }
 impl Engine {
-    pub fn new() -> Self {
+    fn new() -> Self {
         let entity_uid_factory: Arc<EntityUidFactory> = Default::default();
         let master_track = TrackActor::new_with(TrackUid::default(), true, &entity_uid_factory);
         let master_track_request = master_track.sender().clone();

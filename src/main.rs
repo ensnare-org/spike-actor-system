@@ -193,7 +193,7 @@ impl ServiceManager {
         // manager, rather than being channels that the service manager uses to
         // aggregate other services.
         let sm_receiver = self.input_channel_pair.receiver.clone();
-        let sm_sender = self.event_channel_pair.sender.clone();
+        let service_manager_sender = self.event_channel_pair.sender.clone();
 
         std::thread::spawn(move || {
             let mut sel = Select::new();
@@ -246,11 +246,11 @@ impl ServiceManager {
                                     // TODO: blink activity.... (or get rid of this, because we sent it so we already know about it....)
                                 }
                                 MidiServiceEvent::InputPortsRefreshed(ports) => {
-                                    let _ = sm_sender
+                                    let _ = service_manager_sender
                                         .try_send(ServiceEvent::MidiInputsRefreshed(ports));
                                 }
                                 MidiServiceEvent::OutputPortsRefreshed(ports) => {
-                                    let _ = sm_sender
+                                    let _ = service_manager_sender
                                         .try_send(ServiceEvent::MidiOutputsRefreshed(ports));
                                 }
                             }
@@ -260,11 +260,13 @@ impl ServiceManager {
                         if let Ok(event) = Self::recv_operation(operation, &engine_receiver) {
                             match event {
                                 EngineServiceEvent::NewEngine(new_o) => {
-                                    let _ = sm_sender.try_send(ServiceEvent::NewEngine(new_o));
+                                    let _ = service_manager_sender
+                                        .try_send(ServiceEvent::NewEngine(new_o));
                                 }
                                 EngineServiceEvent::Midi(channel, message) => {
-                                    let _ = midi_sender
-                                        .send(MidiInterfaceServiceInput::Midi(channel, message));
+                                    let _ = midi_sender.try_send(MidiInterfaceServiceInput::Midi(
+                                        channel, message,
+                                    ));
                                 }
                             }
                         }

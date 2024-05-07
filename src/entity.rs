@@ -6,7 +6,7 @@ use std::{
     sync::{atomic::AtomicBool, Arc, Mutex},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EntityRequest {
     /// Connect a MIDI receiver to this entity's MIDI output.
     MidiSubscribe(Sender<EntityAction>),
@@ -74,12 +74,12 @@ pub struct EntityActor {
     is_sound_active: Arc<AtomicBool>,
 }
 impl EntityActor {
-    pub fn new_with(entity: impl EntityBounds + 'static) -> Self {
+    pub(crate) fn new_with(entity: impl EntityBounds + 'static) -> Self {
         let uid = entity.uid();
         Self::new_with_wrapped(uid, Arc::new(Mutex::new(entity)))
     }
 
-    pub fn new_with_wrapped(uid: Uid, entity: Arc<Mutex<dyn EntityBounds>>) -> Self {
+    pub(crate) fn new_with_wrapped(uid: Uid, entity: Arc<Mutex<dyn EntityBounds>>) -> Self {
         let r = Self {
             request_channel_pair: Default::default(),
             action_channel_pair: Default::default(),
@@ -225,7 +225,7 @@ impl EntityActor {
         });
     }
 
-    pub fn send(&self, msg: EntityRequest) {
+    pub(crate) fn send(&self, msg: EntityRequest) {
         let _ = self.request_channel_pair.sender.try_send(msg);
     }
 

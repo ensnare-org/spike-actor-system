@@ -44,7 +44,7 @@ impl Displays for Quietener {
     }
 }
 impl Quietener {
-    pub fn set_quiet_factor(&mut self, quiet_factor: Normal) {
+    fn set_quiet_factor(&mut self, quiet_factor: Normal) {
         self.quiet_factor = quiet_factor;
     }
 }

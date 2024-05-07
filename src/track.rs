@@ -97,6 +97,7 @@ impl TrackActorStateMachine {
     fn handle_midi(&mut self, uid: Uid, channel: MidiChannel, message: MidiMessage) {
         self.subscription
             .broadcast(TrackAction::Midi(channel, message));
+        // TODO: opportunity to use direct channels?
         if let Ok(track) = self.track.lock() {
             for actor in track.actors.values().filter(|&a| a.uid() != uid) {
                 actor.send(EntityRequest::Midi(channel, message));
@@ -261,7 +262,7 @@ impl ProvidesActorService<TrackRequest, TrackAction> for TrackActor {
     }
 }
 impl TrackActor {
-    pub fn new_with(
+    pub(crate) fn new_with(
         track_uid: TrackUid,
         is_master_track: bool,
         uid_factory: &Arc<EntityUidFactory>,
@@ -307,16 +308,16 @@ impl TrackActor {
                             match request {
                                 TrackRequest::Midi(channel, message) => {
                                     if let Ok(track) = track.lock() {
-                                        for actor in track.actors.values() {
-                                            actor.send(EntityRequest::Midi(channel, message));
-                                        }
+                                        track
+                                            .entity_request_subscription
+                                            .broadcast(EntityRequest::Midi(channel, message));
                                     }
                                 }
                                 TrackRequest::Control(index, value) => {
                                     if let Ok(track) = track.lock() {
-                                        for actor in track.actors.values() {
-                                            actor.send(EntityRequest::Control(index, value));
-                                        }
+                                        track
+                                            .entity_request_subscription
+                                            .broadcast(EntityRequest::Control(index, value));
                                     }
                                 }
                                 TrackRequest::NeedsAudio(count) => {
@@ -324,17 +325,17 @@ impl TrackActor {
                                 }
                                 TrackRequest::Quit => {
                                     if let Ok(track) = track.lock() {
-                                        for actor in track.actors.values() {
-                                            actor.send(EntityRequest::Quit);
-                                        }
+                                        track
+                                            .entity_request_subscription
+                                            .broadcast(EntityRequest::Quit);
                                     }
                                     break;
                                 }
                                 TrackRequest::Work(time_range) => {
                                     if let Ok(track) = track.lock() {
-                                        for actor in track.actors.values() {
-                                            actor.send(EntityRequest::Work(time_range.clone()));
-                                        }
+                                        track
+                                            .entity_request_subscription
+                                            .broadcast(EntityRequest::Work(time_range.clone()));
                                     }
                                 }
                                 TrackRequest::AddSend(uid, sender) => {
@@ -392,6 +393,8 @@ struct Track {
     actors: HashMap<Uid, EntityActor>,
     send_tracks: HashMap<TrackUid, Sender<TrackRequest>>,
 
+    entity_request_subscription: Subscription<EntityRequest>,
+
     controllables: Vec<ControllableItem>,
     control_links: HashMap<Uid, Vec<ControlLink>>,
 }
@@ -410,6 +413,7 @@ impl Track {
             ordered_actor_uids: Default::default(),
             actors: Default::default(),
             send_tracks: Default::default(),
+            entity_request_subscription: Default::default(),
             controllables: vec![ControllableItem {
                 name: "None".to_string(),
                 uid: Uid::default(),
@@ -436,6 +440,7 @@ impl Track {
             }
         }
 
+        self.entity_request_subscription.subscribe(actor.sender());
         self.ordered_actor_uids.push(uid);
         self.actors.insert(uid, actor);
     }
@@ -450,12 +455,15 @@ impl Track {
     }
 
     fn remove_actor(&mut self, uid: Uid) {
+        if let Some(actor) = self.actors.get(&uid) {
+            self.entity_request_subscription.unsubscribe(actor.sender());
+        }
         self.actors.remove(&uid);
         self.ordered_actor_uids.retain(|u| *u != uid);
         self.controllables.retain(|c| c.uid != uid);
     }
 
-    pub fn link(
+    fn link(
         &mut self,
         source_uid: Uid,
         target_uid: Uid,
@@ -480,7 +488,7 @@ impl Track {
         Err(anyhow!("Couldn't find both {source_uid} and {target_uid}"))
     }
 
-    pub fn unlink(&mut self, source_uid: Uid, target_uid: Uid, index: ControlIndex) {
+    fn unlink(&mut self, source_uid: Uid, target_uid: Uid, index: ControlIndex) {
         if let Some(source) = self.actors.get(&source_uid) {
             if let Some(target) = self.actors.get(&target_uid) {
                 source.send_request(EntityRequest::ControlUnsubscribe(
