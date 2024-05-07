@@ -1,8 +1,8 @@
 use ensnare::prelude::*;
-use ensnare_proc_macros::{IsEntity, Metadata};
+use ensnare_proc_macros::{Control, IsEntity, Metadata};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, IsEntity, Metadata, Serialize, Deserialize)]
+#[derive(Debug, Default, Control, IsEntity, Metadata, Serialize, Deserialize)]
 #[entity(Controls, TransformsAudio)]
 pub struct BusyWaiter {
     uid: Uid,
@@ -18,4 +18,3 @@ impl Generates<StereoSample> for BusyWaiter {
 }
 impl Configurable for BusyWaiter {}
 impl Displays for BusyWaiter {}
-impl Controllable for BusyWaiter {}

@@ -53,14 +53,6 @@ pub enum TrackAction {
     ///
     /// TODO: replace with channels!
     Midi(MidiChannel, MidiMessage),
-    /// The [Entity] with the given [Uid] has produced the given signal that
-    /// should be handled. The track has already routed it appropriately within
-    /// itself (TODO - really? Doesn't that mean each track is keeping a table
-    /// of subscribers, in addition to the global one?).
-    ///
-    /// TODO: replace with channels!
-    #[allow(dead_code)]
-    Control(Uid, ControlValue),
     /// This track has produced a buffer of frames.
     Frames(TrackUid, Vec<StereoSample>),
 }
@@ -90,8 +82,8 @@ impl TrackActorStateMachine {
             EntityAction::Midi(uid, channel, message) => {
                 self.handle_midi(uid, channel, message);
             }
-            EntityAction::Control(source_uid, value) => {
-                self.handle_control(source_uid, value);
+            EntityAction::Control(_source_uid, _value) => {
+                panic!("Track shouldn't receive a Control message because they don't subscribe to them.")
             }
             EntityAction::Frames(frames) => {
                 self.handle_incoming_frames(frames);
@@ -112,28 +104,13 @@ impl TrackActorStateMachine {
         }
     }
 
-    fn handle_control(&mut self, source_uid: Uid, value: ControlValue) {
-        self.subscription
-            .broadcast(TrackAction::Control(source_uid, value));
-    }
-
     fn handle_track_action(&mut self, action: TrackAction) {
         match action {
             TrackAction::Midi(channel, message) => {
                 self.subscription
                     .broadcast(TrackAction::Midi(channel, message));
             }
-            TrackAction::Control(source_uid, value) => {
-                self.handle_control(source_uid, value);
-            }
             TrackAction::Frames(_track_uid, frames) => {
-                // TODO: if we're receiving this, then we might be a parent of a
-                // track that is waiting as an aux track for this frame. Think
-                // about how to represent that (and should the master track be
-                // using the same method?).
-
-                //                dddddddo this MAYBE WE GET THIS FOR FREE
-
                 self.handle_incoming_frames(frames);
             }
         }

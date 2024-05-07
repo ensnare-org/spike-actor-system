@@ -155,10 +155,6 @@ impl EngineService {
                                     let _ = service_event_sender
                                         .send(EngineServiceEvent::Midi(channel, message));
                                 }
-                                TrackAction::Control(_index, _value) => {
-                                    // todo!("route stuff across tracks {index} {value}?");
-                                    // This should go away when we go 100% channels
-                                }
                                 TrackAction::Frames(_track_uid, frames) => {
                                     // We don't care about track_uid because we
                                     // know that only the master track sends us
@@ -171,14 +167,9 @@ impl EngineService {
 
                                         if let Some(queue) = audio_queue.as_ref() {
                                             for &frame in frames.iter() {
-                                                let push_result = queue.force_push(frame);
-                                                assert!(
-                                                    push_result.is_none(),
-                                                    "queue len/cap {}/{}, frames {}",
-                                                    queue.len(),
-                                                    queue.capacity(),
-                                                    frames_requested
-                                                );
+                                                if queue.force_push(frame).is_some() {
+                                                    eprintln!("FYI force_push queue len/cap {}/{}, frames {}", queue.len(), queue.capacity(), frames_requested);
+                                                }
                                             }
                                         }
                                         writer_service.send_input(WavWriterInput::Frames(frames));
