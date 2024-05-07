@@ -18,7 +18,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TrackRequest {
     /// Add a subscriber to our actions.
     Subscribe(Sender<TrackAction>),

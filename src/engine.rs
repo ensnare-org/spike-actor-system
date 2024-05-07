@@ -1,4 +1,5 @@
 use crate::{
+    subscription::Subscription,
     track::{TrackAction, TrackActor, TrackRequest},
     traits::{ProvidesActorService, ProvidesService},
     wav_writer::{WavWriterInput, WavWriterService},
@@ -68,7 +69,7 @@ impl EngineService {
     pub fn new() -> Self {
         let track_action_channel_pair: ChannelPair<TrackAction> = Default::default();
         let r = Self {
-            engine: Arc::new(Mutex::new(Engine::new_with_sender(
+            engine: Arc::new(Mutex::new(Engine::new_with(
                 &track_action_channel_pair.sender,
             ))),
             input_channel_pair: Default::default(),
@@ -238,11 +239,13 @@ pub struct Engine {
     ordered_track_uids: Vec<TrackUid>,
     tracks: HashMap<TrackUid, TrackActor>,
     track_uid_factory: Arc<TrackUidFactory>,
+    entity_uid_factory: Arc<EntityUidFactory>,
 
     master_track_info: TrackActorInfo,
 
     transport: Transport,
-    uid_factory: Arc<EntityUidFactory>,
+
+    track_subscription: Subscription<TrackRequest>,
 }
 impl Configurable for Engine {
     delegate! {
@@ -305,7 +308,7 @@ impl Controls for Engine {
     }
 }
 impl Engine {
-    pub fn new_with_sender(action_sender: &Sender<TrackAction>) -> Self {
+    pub fn new_with(action_sender: &Sender<TrackAction>) -> Self {
         let mut r = Self {
             action_sender: action_sender.clone(),
             c: Default::default(),
@@ -315,7 +318,8 @@ impl Engine {
             track_uid_factory: Default::default(),
             master_track_info: Default::default(),
             transport: Default::default(),
-            uid_factory: Default::default(),
+            entity_uid_factory: Default::default(),
+            track_subscription: Default::default(),
         };
         let _ = r.create_track();
         r
@@ -330,7 +334,7 @@ impl Engine {
         true
     }
 
-    pub fn start_generation(&mut self, count: usize) {
+    fn start_generation(&mut self, count: usize) {
         self.buffer.resize(count);
         self.buffer.clear();
 
@@ -344,11 +348,8 @@ impl Engine {
             let time_range = self.transport.advance(count);
 
             // Ask tracks to do their time-based work.
-            for track_uid in self.ordered_track_uids.iter() {
-                if let Some(track) = self.tracks.get(track_uid) {
-                    track.send_request(TrackRequest::Work(time_range.clone()));
-                }
-            }
+            self.track_subscription
+                .broadcast(TrackRequest::Work(time_range));
 
             // Ask master track for next buffer of frames.
             let _ = self
@@ -370,7 +371,7 @@ impl Engine {
             } else {
                 &self.master_track_info.action_sender
             },
-            &self.uid_factory,
+            &self.entity_uid_factory,
         );
         if create_master_track {
             self.master_track_info = TrackActorInfo {
@@ -387,6 +388,7 @@ impl Engine {
                     track_actor.sender().clone(),
                 ));
         }
+        self.track_subscription.subscribe(track_actor.sender());
         self.ordered_track_uids.push(track_uid);
         self.tracks.insert(track_uid, track_actor);
 
