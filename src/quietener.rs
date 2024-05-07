@@ -30,9 +30,15 @@ impl Configurable for Quietener {}
 impl Displays for Quietener {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
         let mut v = self.quiet_factor.0;
-        let response = ui.add(DragValue::new(&mut v).prefix("Quiet level: "));
+        let response = ui.add(
+            DragValue::new(&mut v)
+                .prefix("Quiet level: ")
+                .fixed_decimals(2)
+                .speed(0.01)
+                .clamp_range(0.0..=1.0),
+        );
         if response.changed() {
-            self.quiet_factor.0 = v;
+            self.quiet_factor.set(v);
         }
         response
     }
