@@ -444,7 +444,10 @@ impl Track {
 
     fn add_entity(&mut self, mut entity: impl EntityBounds + 'static) {
         entity.set_uid(self.uid_factory.mint_next());
-        let actor = EntityActor::new_and_subscribe(entity, &self.entity_action_sender);
+        let actor = EntityActor::new_with(entity);
+        actor.send_request(EntityRequest::MidiSubscribe(
+            self.entity_action_sender.clone(),
+        ));
         self.add_actor(actor);
     }
 

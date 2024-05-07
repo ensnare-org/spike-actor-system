@@ -61,7 +61,7 @@ pub struct EntityActor {
     /// Incoming requests to this entity.
     request_channel_pair: ChannelPair<EntityRequest>,
 
-    /// Receipient of actions that this entity is subscribed to.
+    /// Receipient of this entity's actions.
     action_channel_pair: ChannelPair<EntityAction>,
 
     /// A cached copy of entity's [Uid].
@@ -74,20 +74,9 @@ pub struct EntityActor {
     is_sound_active: Arc<AtomicBool>,
 }
 impl EntityActor {
-    #[allow(dead_code)]
     pub fn new_with(entity: impl EntityBounds + 'static) -> Self {
         let uid = entity.uid();
         Self::new_with_wrapped(uid, Arc::new(Mutex::new(entity)))
-    }
-
-    pub fn new_and_subscribe(
-        entity: impl EntityBounds + 'static,
-        sender: &Sender<EntityAction>,
-    ) -> Self {
-        let uid = entity.uid();
-        let actor = Self::new_with_wrapped(uid, Arc::new(Mutex::new(entity)));
-        actor.send_request(EntityRequest::MidiSubscribe(sender.clone()));
-        actor
     }
 
     pub fn new_with_wrapped(uid: Uid, entity: Arc<Mutex<dyn EntityBounds>>) -> Self {
