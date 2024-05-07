@@ -272,9 +272,8 @@ impl HandlesMidi for Engine {
         message: MidiMessage,
         _midi_messages_fn: &mut MidiMessagesFn,
     ) {
-        for track in self.tracks.values_mut() {
-            track.send_request(TrackRequest::Midi(channel, message));
-        }
+        self.track_subscription
+            .broadcast(TrackRequest::Midi(channel, message));
     }
 
     fn midi_note_label_metadata(&self) -> Option<MidiNoteLabelMetadata> {
@@ -409,9 +408,7 @@ impl Engine {
     }
 
     fn request_quit(&mut self) {
-        for track in self.tracks.values() {
-            track.send_request(TrackRequest::Quit);
-        }
+        self.track_subscription.broadcast(TrackRequest::Quit);
     }
 }
 impl Displays for Engine {
