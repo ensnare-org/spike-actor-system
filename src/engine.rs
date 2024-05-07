@@ -131,7 +131,7 @@ impl EngineService {
                                 EngineServiceInput::Midi(channel, message) => engine
                                     .lock()
                                     .unwrap()
-                                    .handle_midi_message(channel, message, &mut |_, _| panic!()),
+                                    .handle_midi_message(channel, message, &mut |_, _| panic!("This MIDI message should have been sent via channel, not callback.")),
                                 EngineServiceInput::NeedsAudio(count) => {
                                     if frames_requested == 0 {
                                         start_generation = true;
@@ -153,6 +153,13 @@ impl EngineService {
                         {
                             match action {
                                 TrackAction::Midi(channel, message) => {
+                                    // TODO: is this the right point to
+                                    // concentrate these messages? It seems
+                                    // burdensome for the external MIDI service
+                                    // to subscribe to every entity, but it
+                                    // seems arbitrary for it to subscribe to
+                                    // every track (maybe it's a feature to
+                                    // switch on/off per track).
                                     let _ = service_event_sender
                                         .send(EngineServiceEvent::Midi(channel, message));
                                 }
