@@ -46,9 +46,7 @@ pub enum TrackRequest {
 pub enum TrackAction {
     /// The [Track] has produced a MIDI message that should be considered for
     /// routing elsewhere. The track has already routed it appropriately within
-    /// itself.
-    ///
-    /// TODO: replace with channels!
+    /// itself, and now it's telling anyone else interested.
     Midi(MidiChannel, MidiMessage),
     /// This track has produced a buffer of frames.
     Frames(TrackUid, Vec<StereoSample>),
@@ -257,15 +255,6 @@ pub struct TrackActor {
     /// Receives requests.
     request_channel_pair: ChannelPair<TrackRequest>,
 
-    /// Receives entity actions.
-    entity_action_channel_pair: ChannelPair<EntityAction>,
-
-    /// Receives MIDI actions.
-    midi_action_channel_pair: ChannelPair<MidiAction>,
-
-    /// Receives control actions.
-    control_action_channel_pair: ChannelPair<ControlAction>,
-
     /// Receives child track actions.
     track_action_channel_pair: ChannelPair<TrackAction>,
 
@@ -308,29 +297,36 @@ impl TrackActor {
         );
         let mut r = Self {
             request_channel_pair: Default::default(),
-            entity_action_channel_pair,
-            midi_action_channel_pair,
-            control_action_channel_pair,
             track_action_channel_pair: Default::default(),
             inner: Arc::new(Mutex::new(track)),
         };
 
-        r.start_thread();
+        r.start_thread(
+            entity_action_channel_pair,
+            midi_action_channel_pair,
+            control_action_channel_pair,
+        );
 
         r
     }
 
-    fn start_thread(&mut self) {
+    fn start_thread(
+        &mut self,
+        entity_action_channel_pair: ChannelPair<EntityAction>,
+        midi_action_channel_pair: ChannelPair<MidiAction>,
+        control_action_channel_pair: ChannelPair<ControlAction>,
+    ) {
         let input_receiver = self.request_channel_pair.receiver.clone();
         let track = Arc::clone(&self.inner);
-        let entity_receiver = self.entity_action_channel_pair.receiver.clone();
-        let midi_receiver = self.midi_action_channel_pair.receiver.clone();
-        let control_receiver = self.control_action_channel_pair.receiver.clone();
         let track_receiver = self.track_action_channel_pair.receiver.clone();
         let mut state_machine = TrackActorStateMachine::new_with(&self.inner);
 
         std::thread::spawn(move || {
             let mut sel = Select::default();
+
+            let entity_receiver = entity_action_channel_pair.receiver.clone();
+            let midi_receiver = midi_action_channel_pair.receiver.clone();
+            let control_receiver = control_action_channel_pair.receiver.clone();
 
             let input_index = sel.recv(&input_receiver);
             let entity_index = sel.recv(&entity_receiver);

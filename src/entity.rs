@@ -78,9 +78,6 @@ pub struct EntityActor {
     /// actions on this channel.
     action_channel_pair: ChannelPair<EntityAction>,
 
-    /// MIDI-in channel.
-    midi_channel_pair: ChannelPair<MidiAction>,
-
     /// Control receiver channel.
     control_channel_pair: ChannelPair<ControlAction>,
 
@@ -103,7 +100,6 @@ impl EntityActor {
         let r = Self {
             request_channel_pair: Default::default(),
             action_channel_pair: Default::default(),
-            midi_channel_pair: Default::default(),
             control_channel_pair: Default::default(),
             uid,
             entity,
@@ -118,16 +114,17 @@ impl EntityActor {
         let mut action_subscription: Subscription<EntityAction> = Default::default();
         let mut midi_subscription: Subscription<MidiAction> = Default::default();
         let mut control_subscription: Subscription<ControlAction> = Default::default();
-        // let mut control_links: Subscription<EntityAction> = Default::default();
         let mut source_uid_to_control_indexes: HashMap<Uid, Vec<ControlIndex>> = Default::default();
         let entity = Arc::clone(&self.entity);
         let mut buffer = GenerationBuffer::<StereoSample>::default();
         let is_sound_active = Arc::clone(&self.is_sound_active);
         let action_receiver = self.action_channel_pair.receiver.clone();
-        let midi_receiver = self.midi_channel_pair.receiver.clone();
         let control_receiver = self.control_channel_pair.receiver.clone();
 
         std::thread::spawn(move || {
+            let midi_channel_pair: ChannelPair<MidiAction> = Default::default();
+            let midi_receiver = midi_channel_pair.receiver.clone();
+
             let mut sel = Select::default();
             let request_index = sel.recv(&request_receiver);
             let action_index = sel.recv(&action_receiver);
