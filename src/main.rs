@@ -130,24 +130,25 @@ mod wav_writer;
 pub(crate) const ATOMIC_ORDERING: Ordering = Ordering::Relaxed;
 
 #[derive(Debug)]
-enum ServiceInput {
+enum AppServiceInput {
     Quit,
     MidiInputPortSelected(MidiPortDescriptor),
     MidiOutputPortSelected(MidiPortDescriptor),
 }
 
 #[derive(Debug)]
-enum ServiceEvent {
-    NewEngine(Arc<Mutex<Engine>>),
+enum AppServiceEvent {
+    /// The service has started or restarted.
+    Reset(Arc<Mutex<Engine>>),
     MidiInputsRefreshed(Vec<MidiPortDescriptor>),
     MidiOutputsRefreshed(Vec<MidiPortDescriptor>),
 }
 
 /// Manages all the services that the app uses.
 #[derive(Debug)]
-struct ServiceManager {
-    input_channel_pair: ChannelPair<ServiceInput>,
-    event_channel_pair: ChannelPair<ServiceEvent>,
+struct AppServiceManager {
+    input_channel_pair: ChannelPair<AppServiceInput>,
+    event_channel_pair: ChannelPair<AppServiceEvent>,
 
     // reason = "We need to keep a reference to the service or else it'll be dropped"
     #[allow(dead_code)]
@@ -159,16 +160,16 @@ struct ServiceManager {
     #[allow(dead_code)]
     midi_settings: Arc<RwLock<MidiSettings>>,
 }
-impl ProvidesService<ServiceInput, ServiceEvent> for ServiceManager {
-    fn receiver(&self) -> &Receiver<ServiceEvent> {
+impl ProvidesService<AppServiceInput, AppServiceEvent> for AppServiceManager {
+    fn receiver(&self) -> &Receiver<AppServiceEvent> {
         &self.event_channel_pair.receiver
     }
 
-    fn sender(&self) -> &Sender<ServiceInput> {
+    fn sender(&self) -> &Sender<AppServiceInput> {
         &self.input_channel_pair.sender
     }
 }
-impl ServiceManager {
+impl AppServiceManager {
     pub fn new() -> Self {
         let midi_settings = Arc::new(RwLock::new(MidiSettings::default()));
         let r = Self {
@@ -193,7 +194,7 @@ impl ServiceManager {
         // is the set of channels that the app uses to talk with the service
         // manager, rather than being channels that the service manager uses to
         // aggregate other services.
-        let sm_receiver = self.input_channel_pair.receiver.clone();
+        let service_manager_receiver = self.input_channel_pair.receiver.clone();
         let service_manager_sender = self.event_channel_pair.sender.clone();
 
         std::thread::spawn(move || {
@@ -207,13 +208,35 @@ impl ServiceManager {
             let audio_sender = audio_service.sender().clone();
             let audio_index = sel.recv(&audio_receiver);
 
-            let ui_index = sel.recv(&sm_receiver);
+            let service_manager_index = sel.recv(&service_manager_receiver);
             let midi_index = sel.recv(&midi_receiver);
             let engine_index = sel.recv(&engine_receiver);
 
             loop {
                 let operation = sel.select();
                 match operation.index() {
+                    index if index == service_manager_index => {
+                        if let Ok(input) = Self::recv_operation(operation, &service_manager_receiver) {
+                            match input {
+                                AppServiceInput::Quit => {
+                                    println!("ServiceInput::Quit");
+                                    let _ = audio_sender.try_send(AudioServiceInput::Quit);
+                                    let _ = midi_sender.try_send(MidiInterfaceServiceInput::Quit);
+                                    let _ = engine_sender.try_send(EngineServiceInput::Quit);
+                                    break;
+                                }
+                                AppServiceInput::MidiInputPortSelected(port) => {
+                                    let _ = midi_sender
+                                        .try_send(MidiInterfaceServiceInput::SelectMidiInput(port));
+                                }
+                                AppServiceInput::MidiOutputPortSelected(port) => {
+                                    let _ = midi_sender.try_send(
+                                        MidiInterfaceServiceInput::SelectMidiOutput(port),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     index if index == audio_index => {
                         if let Ok(event) = Self::recv_operation(operation, &audio_receiver) {
                             match event {
@@ -248,11 +271,11 @@ impl ServiceManager {
                                 }
                                 MidiServiceEvent::InputPortsRefreshed(ports) => {
                                     let _ = service_manager_sender
-                                        .try_send(ServiceEvent::MidiInputsRefreshed(ports));
+                                        .try_send(AppServiceEvent::MidiInputsRefreshed(ports));
                                 }
                                 MidiServiceEvent::OutputPortsRefreshed(ports) => {
                                     let _ = service_manager_sender
-                                        .try_send(ServiceEvent::MidiOutputsRefreshed(ports));
+                                        .try_send(AppServiceEvent::MidiOutputsRefreshed(ports));
                                 }
                             }
                         }
@@ -260,36 +283,14 @@ impl ServiceManager {
                     index if index == engine_index => {
                         if let Ok(event) = Self::recv_operation(operation, &engine_receiver) {
                             match event {
-                                EngineServiceEvent::NewEngine(new_o) => {
+                                EngineServiceEvent::Reset(new_o) => {
                                     let _ = service_manager_sender
-                                        .try_send(ServiceEvent::NewEngine(new_o));
+                                        .try_send(AppServiceEvent::Reset(new_o));
                                 }
                                 EngineServiceEvent::Midi(channel, message) => {
                                     let _ = midi_sender.try_send(MidiInterfaceServiceInput::Midi(
                                         channel, message,
                                     ));
-                                }
-                            }
-                        }
-                    }
-                    index if index == ui_index => {
-                        if let Ok(input) = Self::recv_operation(operation, &sm_receiver) {
-                            match input {
-                                ServiceInput::Quit => {
-                                    println!("ServiceInput::Quit");
-                                    let _ = audio_sender.try_send(AudioServiceInput::Quit);
-                                    let _ = midi_sender.try_send(MidiInterfaceServiceInput::Quit);
-                                    let _ = engine_sender.try_send(EngineServiceInput::Quit);
-                                    break;
-                                }
-                                ServiceInput::MidiInputPortSelected(port) => {
-                                    let _ = midi_sender
-                                        .try_send(MidiInterfaceServiceInput::SelectMidiInput(port));
-                                }
-                                ServiceInput::MidiOutputPortSelected(port) => {
-                                    let _ = midi_sender.try_send(
-                                        MidiInterfaceServiceInput::SelectMidiOutput(port),
-                                    );
                                 }
                             }
                         }
@@ -303,7 +304,7 @@ impl ServiceManager {
 
 #[derive(Debug)]
 struct ActorSystemApp {
-    service_manager: ServiceManager,
+    service_manager: AppServiceManager,
     engine: Option<Arc<Mutex<Engine>>>,
     midi_input_ports: Vec<MidiPortDescriptor>,
     midi_input_selected: usize,
@@ -314,9 +315,9 @@ impl eframe::App for ActorSystemApp {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(event) = self.service_manager.receiver().try_recv() {
             match event {
-                ServiceEvent::NewEngine(new_o) => self.engine = Some(new_o),
-                ServiceEvent::MidiInputsRefreshed(ports) => self.midi_input_ports = ports,
-                ServiceEvent::MidiOutputsRefreshed(ports) => self.midi_output_ports = ports,
+                AppServiceEvent::Reset(new_o) => self.engine = Some(new_o),
+                AppServiceEvent::MidiInputsRefreshed(ports) => self.midi_input_ports = ports,
+                AppServiceEvent::MidiOutputsRefreshed(ports) => self.midi_output_ports = ports,
             }
         }
         CentralPanel::default().show(ctx, |ui| {
@@ -336,7 +337,7 @@ impl eframe::App for ActorSystemApp {
                     .changed()
             {
                 self.service_manager
-                    .send_input(ServiceInput::MidiInputPortSelected(
+                    .send_input(AppServiceInput::MidiInputPortSelected(
                         self.midi_input_ports[self.midi_input_selected].clone(),
                     ));
             }
@@ -352,7 +353,7 @@ impl eframe::App for ActorSystemApp {
                     .changed()
             {
                 self.service_manager
-                    .send_input(ServiceInput::MidiOutputPortSelected(
+                    .send_input(AppServiceInput::MidiOutputPortSelected(
                         self.midi_output_ports[self.midi_output_selected].clone(),
                     ))
             }
@@ -361,7 +362,10 @@ impl eframe::App for ActorSystemApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        let _ = self.service_manager.sender().try_send(ServiceInput::Quit);
+        let _ = self
+            .service_manager
+            .sender()
+            .try_send(AppServiceInput::Quit);
     }
 }
 impl ActorSystemApp {
@@ -369,7 +373,7 @@ impl ActorSystemApp {
 
     pub fn new() -> Self {
         Self {
-            service_manager: ServiceManager::new(),
+            service_manager: AppServiceManager::new(),
             engine: Default::default(),
             midi_input_ports: Default::default(),
             midi_input_selected: Default::default(),

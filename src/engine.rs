@@ -37,7 +37,9 @@ pub enum EngineServiceInput {
 
 #[derive(Debug)]
 pub enum EngineServiceEvent {
-    NewEngine(Arc<Mutex<Engine>>),
+    /// The engine has started up or reset. Take the given parameters and save
+    /// them.
+    Reset(Arc<Mutex<Engine>>),
     /// The engine produced a MIDI message.
     Midi(MidiChannel, MidiMessage),
 }
@@ -89,7 +91,7 @@ impl EngineService {
         let _ = self
             .event_channel_pair
             .sender
-            .try_send(EngineServiceEvent::NewEngine(Arc::clone(&self.engine)));
+            .try_send(EngineServiceEvent::Reset(Arc::clone(&self.engine)));
         let service_input_receiver = self.input_channel_pair.receiver.clone();
         let mut audio_queue: Option<Arc<ArrayQueue<StereoSample>>> = None;
 
