@@ -291,10 +291,6 @@ impl ProvidesActorService<EntityRequest, AudioAction> for EntityActor {
     fn sender(&self) -> &Sender<EntityRequest> {
         &self.request_channel_pair.sender
     }
-
-    fn action_sender(&self) -> &Sender<AudioAction> {
-        &self.audio_channel_pair.sender
-    }
 }
 impl Displays for EntityActor {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {

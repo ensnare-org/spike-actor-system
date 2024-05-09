@@ -1,6 +1,7 @@
 use crate::{
+    actions::{AudioAction, MidiAction},
     subscription::Subscription,
-    track::{TrackAction, TrackActor, TrackRequest},
+    track::{TrackActor, TrackRequest},
     traits::{ProvidesActorService, ProvidesService},
     wav_writer::{WavWriterInput, WavWriterService},
 };
@@ -42,7 +43,8 @@ pub enum EngineServiceEvent {
 pub struct EngineService {
     input_channel_pair: ChannelPair<EngineServiceInput>,
     event_channel_pair: ChannelPair<EngineServiceEvent>,
-    track_action_channel_pair: ChannelPair<TrackAction>,
+    audio_action_channel_pair: ChannelPair<AudioAction>,
+    midi_action_channel_pair: ChannelPair<MidiAction>,
 
     engine: Arc<Mutex<Engine>>,
 }
@@ -62,15 +64,18 @@ impl ProvidesService<EngineServiceInput, EngineServiceEvent> for EngineService {
 }
 impl EngineService {
     pub fn new() -> Self {
-        let track_action_channel_pair: ChannelPair<TrackAction> = Default::default();
+        let audio_action_channel_pair: ChannelPair<AudioAction> = Default::default();
+        let midi_action_channel_pair: ChannelPair<MidiAction> = Default::default();
         let mut engine = Engine::new();
-        engine.subscribe(&track_action_channel_pair.sender);
+        engine.subscribe_audio(&audio_action_channel_pair.sender);
+        engine.subscribe_midi(&midi_action_channel_pair.sender);
 
         let r = Self {
             engine: Arc::new(Mutex::new(engine)),
             input_channel_pair: Default::default(),
             event_channel_pair: Default::default(),
-            track_action_channel_pair,
+            audio_action_channel_pair,
+            midi_action_channel_pair,
         };
 
         r.start_thread();
@@ -93,12 +98,14 @@ impl EngineService {
 
         let mut frames_requested = 0;
 
-        let track_action_receiver = self.track_action_channel_pair.receiver.clone();
+        let audio_action_receiver = self.audio_action_channel_pair.receiver.clone();
+        let midi_action_receiver = self.midi_action_channel_pair.receiver.clone();
 
         std::thread::spawn(move || {
             let mut sel = Select::default();
             let service_index = sel.recv(&service_input_receiver);
-            let track_index = sel.recv(&track_action_receiver);
+            let audio_index = sel.recv(&audio_action_receiver);
+            let midi_index = sel.recv(&midi_action_receiver);
 
             loop {
                 let operation = sel.select();
@@ -142,63 +149,56 @@ impl EngineService {
                             }
                         }
                     }
-                    index if index == track_index => {
-                        if let Ok(action) = Self::recv_operation(operation, &track_action_receiver)
+                    index if index == audio_index => {
+                        if let Ok(action) = Self::recv_operation(operation, &audio_action_receiver)
                         {
-                            match action {
-                                TrackAction::Midi(channel, message) => {
-                                    // TODO: is this the right point to
-                                    // concentrate these messages? It seems
-                                    // burdensome for the external MIDI service
-                                    // to subscribe to every entity, but it
-                                    // seems arbitrary for it to subscribe to
-                                    // every track (maybe it's a feature to
-                                    // switch on/off per track).
-                                    let _ = service_event_sender
-                                        .try_send(EngineServiceEvent::Midi(channel, message));
-                                }
-                                TrackAction::Frames(_track_uid, frames) => {
-                                    // We don't care about track_uid because we
-                                    // know that only the master track sends us
-                                    // frames.
+                            let frames_len = action.frames.len();
+                            assert!(frames_len <= 64);
 
-                                    let frames_len = frames.len();
-                                    assert!(frames_len <= 64);
-                                    let frames_len = frames.len();
-
-                                    if let Some(queue) = audio_queue.as_ref() {
-                                        for &frame in frames.iter() {
-                                            if queue.force_push(frame).is_some() {
-                                                eprintln!(
-                                                    "FYI force_push queue len/cap {}/{}, frames {}",
-                                                    queue.len(),
-                                                    queue.capacity(),
-                                                    frames_requested
-                                                );
-                                            }
-                                        }
-                                    }
-                                    writer_service.send_input(WavWriterInput::Frames(frames));
-
-                                    assert!(frames_len <= 64);
-                                    if frames_requested > frames_len {
-                                        // We still have work to do, so kick off
-                                        // generation once again.
-                                        frames_requested -= frames_len;
-                                        start_generation = true;
-                                    } else {
-                                        // The case of (frames_requested <
-                                        // frames_len) can happen because we
-                                        // always generate 64 frames at once,
-                                        // even if the request is for fewer than
-                                        // that. This ends up adding as many as
-                                        // 63 extra frames to the audio queue,
-                                        // but we know we'll be needing it soon,
-                                        // so it's OK.
-                                        frames_requested = 0;
+                            if let Some(queue) = audio_queue.as_ref() {
+                                for &frame in action.frames.iter() {
+                                    if queue.force_push(frame).is_some() {
+                                        eprintln!(
+                                            "FYI force_push queue len/cap {}/{}, frames {}",
+                                            queue.len(),
+                                            queue.capacity(),
+                                            frames_requested
+                                        );
                                     }
                                 }
                             }
+                            writer_service.send_input(WavWriterInput::Frames(action.frames));
+
+                            assert!(frames_len <= 64);
+                            if frames_requested > frames_len {
+                                // We still have work to do, so kick off
+                                // generation once again.
+                                frames_requested -= frames_len;
+                                start_generation = true;
+                            } else {
+                                // The case of (frames_requested <
+                                // frames_len) can happen because we
+                                // always generate 64 frames at once,
+                                // even if the request is for fewer than
+                                // that. This ends up adding as many as
+                                // 63 extra frames to the audio queue,
+                                // but we know we'll be needing it soon,
+                                // so it's OK.
+                                frames_requested = 0;
+                            }
+                        }
+                    }
+                    index if index == midi_index => {
+                        if let Ok(action) = Self::recv_operation(operation, &midi_action_receiver) {
+                            // TODO: is this the right point to
+                            // concentrate these messages? It seems
+                            // burdensome for the external MIDI service
+                            // to subscribe to every entity, but it
+                            // seems arbitrary for it to subscribe to
+                            // every track (maybe it's a feature to
+                            // switch on/off per track).
+                            let _ = service_event_sender
+                                .try_send(EngineServiceEvent::Midi(action.channel, action.message));
                         }
                     }
                     _ => panic!(),
@@ -304,11 +304,16 @@ impl Engine {
         r
     }
 
-    fn subscribe(&mut self, sender: &Sender<TrackAction>) {
-        // The master track produces all the actions that we would publish, so
-        // we delegate the subscription request to it.
+    fn subscribe_audio(&mut self, sender: &Sender<AudioAction>) {
+        // We delegate the subscription request to the master track.
         self.master_track
-            .send_request(TrackRequest::Subscribe(sender.clone()));
+            .send_request(TrackRequest::SubscribeAudio(sender.clone()));
+    }
+
+    fn subscribe_midi(&mut self, sender: &Sender<MidiAction>) {
+        // We delegate the subscription request to the master track.
+        self.master_track
+            .send_request(TrackRequest::SubscribeMidi(sender.clone()));
     }
 
     fn start_generation(&mut self, count: usize) {
@@ -330,8 +335,11 @@ impl Engine {
 
         let track_actor =
             TrackActor::new_with(track_uid, is_master_track, &self.entity_uid_factory);
-        track_actor.send_request(TrackRequest::Subscribe(
-            self.master_track.action_sender().clone(),
+        track_actor.send_request(TrackRequest::SubscribeAudio(
+            self.master_track.audio_sender().clone(),
+        ));
+        track_actor.send_request(TrackRequest::SubscribeMidi(
+            self.master_track.midi_sender().clone(),
         ));
 
         self.master_track.send_request(TrackRequest::AddSend(
@@ -350,8 +358,11 @@ impl Engine {
         self.master_track
             .send_request(TrackRequest::RemoveSend(uid));
         if let Some(track_actor) = self.tracks.get(&uid) {
-            track_actor.send_request(TrackRequest::Unsubscribe(
-                self.master_track.action_sender().clone(),
+            track_actor.send_request(TrackRequest::UnsubscribeAudio(
+                self.master_track.audio_sender().clone(),
+            ));
+            track_actor.send_request(TrackRequest::UnsubscribeMidi(
+                self.master_track.midi_sender().clone(),
             ));
             track_actor.send_request(TrackRequest::Quit);
         }

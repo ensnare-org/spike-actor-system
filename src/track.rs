@@ -11,7 +11,7 @@ use crate::{
     traits::ProvidesActorService,
 };
 use anyhow::anyhow;
-use crossbeam_channel::{Select, Sender};
+use crossbeam_channel::{Receiver, Select, Sender};
 use eframe::egui::{ComboBox, Frame, Margin};
 use ensnare::prelude::*;
 use ensnare_toys::{ToyInstrument, ToySynth};
@@ -22,10 +22,14 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub enum TrackRequest {
-    /// Add a subscriber to our actions.
-    Subscribe(Sender<TrackAction>),
-    /// Remove a subscriber from our actions.
-    Unsubscribe(Sender<TrackAction>),
+    /// Add a subscriber to our audio actions.
+    SubscribeAudio(Sender<AudioAction>),
+    /// Remove a subscriber from our audio actions.
+    UnsubscribeAudio(Sender<AudioAction>),
+    /// Add a subscriber to our audio actions.
+    SubscribeMidi(Sender<MidiAction>),
+    /// Remove a subscriber from our audio actions.
+    UnsubscribeMidi(Sender<MidiAction>),
     /// The track should handle an incoming MIDI message.
     Midi(MidiChannel, MidiMessage),
     /// The track should perform work for the given slice of time.
@@ -42,24 +46,16 @@ pub enum TrackRequest {
     Quit,
 }
 
-/// The [Track] has produced some work that the parent should look at.
-#[derive(Debug, Clone)]
-pub enum TrackAction {
-    /// The [Track] has produced a MIDI message that should be considered for
-    /// routing elsewhere. The track has already routed it appropriately within
-    /// itself, and now it's telling anyone else interested.
-    Midi(MidiChannel, MidiMessage),
-    /// This track has produced a buffer of frames.
-    Frames(TrackUid, Vec<StereoSample>),
-}
-
 #[derive(Debug)]
 pub struct TrackActor {
     /// Receives requests.
     request_channel_pair: ChannelPair<TrackRequest>,
 
-    /// Receives child track actions.
-    track_action_channel_pair: ChannelPair<TrackAction>,
+    /// Receives audio actions.
+    audio_action_channel_pair: ChannelPair<AudioAction>,
+
+    /// Receives MIDI actions.
+    midi_action_channel_pair: ChannelPair<MidiAction>,
 
     inner: Arc<Mutex<Track>>,
 }
@@ -68,13 +64,9 @@ impl Displays for TrackActor {
         self.inner.lock().unwrap().ui(ui)
     }
 }
-impl ProvidesActorService<TrackRequest, TrackAction> for TrackActor {
+impl ProvidesActorService<TrackRequest, AudioAction> for TrackActor {
     fn sender(&self) -> &Sender<TrackRequest> {
         &self.request_channel_pair.sender
-    }
-
-    fn action_sender(&self) -> &Sender<TrackAction> {
-        &self.track_action_channel_pair.sender
     }
 }
 impl TrackActor {
@@ -83,9 +75,18 @@ impl TrackActor {
         is_master_track: bool,
         uid_factory: &Arc<EntityUidFactory>,
     ) -> Self {
+        // These three channel pairs are for actions we want to receive from
+        // downstream (entities and child tracks).
         let audio_action_channel_pair: ChannelPair<AudioAction> = Default::default();
         let midi_action_channel_pair: ChannelPair<MidiAction> = Default::default();
         let control_action_channel_pair: ChannelPair<ControlAction> = Default::default();
+
+        let audio_receiver = audio_action_channel_pair.receiver.clone();
+        let midi_receiver = midi_action_channel_pair.receiver.clone();
+        let control_receiver = control_action_channel_pair.receiver.clone();
+
+        // This structure is a convenient bundle of the channel senders so that
+        // we can subscribe to new entities/tracks as they're created.
         let action_subscription_senders = ActionSubscriptionSenders {
             audio: audio_action_channel_pair.sender.clone(),
             midi: midi_action_channel_pair.sender.clone(),
@@ -100,42 +101,32 @@ impl TrackActor {
         );
         let mut r = Self {
             request_channel_pair: Default::default(),
-            track_action_channel_pair: Default::default(),
+            audio_action_channel_pair,
+            midi_action_channel_pair,
             inner: Arc::new(Mutex::new(track)),
         };
 
-        r.start_thread(
-            audio_action_channel_pair,
-            midi_action_channel_pair,
-            control_action_channel_pair,
-        );
+        r.start_thread(audio_receiver, midi_receiver, control_receiver);
 
         r
     }
 
     fn start_thread(
         &mut self,
-        audio_action_channel_pair: ChannelPair<AudioAction>,
-        midi_action_channel_pair: ChannelPair<MidiAction>,
-        control_action_channel_pair: ChannelPair<ControlAction>,
+        audio_receiver: Receiver<AudioAction>,
+        midi_receiver: Receiver<MidiAction>,
+        control_receiver: Receiver<ControlAction>,
     ) {
         let input_receiver = self.request_channel_pair.receiver.clone();
         let track = Arc::clone(&self.inner);
-        let track_receiver = self.track_action_channel_pair.receiver.clone();
-        // let mut state_machine = TrackActorStateMachine::new_with(&self.inner);
 
         std::thread::spawn(move || {
             let mut sel = Select::default();
-
-            let audio_receiver = audio_action_channel_pair.receiver.clone();
-            let midi_receiver = midi_action_channel_pair.receiver.clone();
-            let control_receiver = control_action_channel_pair.receiver.clone();
 
             let input_index = sel.recv(&input_receiver);
             let audio_index = sel.recv(&audio_receiver);
             let midi_index = sel.recv(&midi_receiver);
             let control_index = sel.recv(&control_receiver);
-            let track_index = sel.recv(&track_receiver);
 
             loop {
                 let operation = sel.select();
@@ -181,11 +172,21 @@ impl TrackActor {
                                         track.send_tracks.remove(&uid);
                                     }
                                 }
-                                TrackRequest::Subscribe(sender) => {
-                                    track.lock().unwrap().handle_subscribe(sender)
+                                TrackRequest::SubscribeAudio(sender) => {
+                                    track.lock().unwrap().audio_subscription.subscribe(&sender);
                                 }
-                                TrackRequest::Unsubscribe(sender) => {
-                                    track.lock().unwrap().handle_unsubscribe(sender)
+                                TrackRequest::UnsubscribeAudio(sender) => {
+                                    track
+                                        .lock()
+                                        .unwrap()
+                                        .audio_subscription
+                                        .unsubscribe(&sender);
+                                }
+                                TrackRequest::SubscribeMidi(sender) => {
+                                    track.lock().unwrap().midi_subscription.subscribe(&sender)
+                                }
+                                TrackRequest::UnsubscribeMidi(sender) => {
+                                    track.lock().unwrap().midi_subscription.unsubscribe(&sender);
                                 }
                             }
                         }
@@ -205,17 +206,20 @@ impl TrackActor {
                             panic!("For now, Tracks shouldn't receive Control messages")
                         }
                     }
-                    index if index == track_index => {
-                        if let Ok(action) = Self::recv_operation(operation, &track_receiver) {
-                            track.lock().unwrap().handle_track_action(action);
-                        }
-                    }
                     _ => {
                         panic!("Unexpected select index")
                     }
                 }
             }
         });
+    }
+
+    pub(crate) fn audio_sender(&self) -> &Sender<AudioAction> {
+        &self.audio_action_channel_pair.sender
+    }
+
+    pub(crate) fn midi_sender(&self) -> &Sender<MidiAction> {
+        &self.midi_action_channel_pair.sender
     }
 }
 
@@ -261,7 +265,8 @@ struct Track {
 
     state: TrackState,
     buffer: GenerationBuffer<StereoSample>,
-    subscription: Subscription<TrackAction>,
+    audio_subscription: Subscription<AudioAction>,
+    midi_subscription: Subscription<MidiAction>,
 }
 impl Track {
     fn new_with(
@@ -293,7 +298,8 @@ impl Track {
 
             state: Default::default(),
             buffer: Default::default(),
-            subscription: Default::default(),
+            audio_subscription: Default::default(),
+            midi_subscription: Default::default(),
         }
     }
 
@@ -391,21 +397,17 @@ impl Track {
         }
     }
 
-    fn handle_subscribe(&mut self, sender: Sender<TrackAction>) {
-        self.subscription.subscribe(&sender);
-    }
-
-    fn handle_unsubscribe(&mut self, sender: Sender<TrackAction>) {
-        self.subscription.unsubscribe(&sender);
-    }
-
     fn handle_audio_action(&mut self, action: AudioAction) {
-        self.handle_incoming_frames(action.frames);
+        let track_uid = TrackUid::default(); // HACK!
+        if self.mixer.is_some() {
+            self.handle_incoming_track_frames(track_uid, action.frames);
+        } else {
+            self.handle_incoming_frames(action.frames);
+        }
     }
 
     fn handle_midi_action(&mut self, action: MidiAction) {
-        self.subscription
-            .broadcast_mut(TrackAction::Midi(action.channel, action.message));
+        self.midi_subscription.broadcast_mut(action.clone());
         // TODO: opportunity to use direct channels?
         for actor in self
             .actors
@@ -413,22 +415,6 @@ impl Track {
             .filter(|&a| a.uid() != action.source_uid)
         {
             actor.send(EntityRequest::Midi(action.channel, action.message));
-        }
-    }
-
-    fn handle_track_action(&mut self, action: TrackAction) {
-        match action {
-            TrackAction::Midi(channel, message) => {
-                self.subscription
-                    .broadcast_mut(TrackAction::Midi(channel, message));
-            }
-            TrackAction::Frames(track_uid, frames) => {
-                if self.mixer.is_some() {
-                    self.handle_incoming_track_frames(track_uid, frames);
-                } else {
-                    self.handle_incoming_frames(frames);
-                }
-            }
         }
     }
 
@@ -501,8 +487,10 @@ impl Track {
 
     fn issue_outgoing_frames_action(&mut self) {
         self.state = TrackState::Idle;
-        self.subscription
-            .broadcast_mut(TrackAction::Frames(self.uid, self.buffer.buffer().into()));
+        self.audio_subscription.broadcast_mut(AudioAction {
+            source_uid: Uid::default(), // HACK
+            frames: self.buffer.buffer().into(),
+        });
     }
 
     fn handle_needs_audio(&mut self, count: usize) {

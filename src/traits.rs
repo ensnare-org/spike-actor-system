@@ -29,9 +29,6 @@ pub trait ProvidesActorService<R, A> {
     fn send_request(&self, request: R) {
         let _ = self.sender().try_send(request);
     }
-    /// Send side of action channel, which allows subscriptions to other
-    /// entities' actions.
-    fn action_sender(&self) -> &Sender<A>;
 
     fn recv_operation<T>(
         oper: crossbeam_channel::SelectedOperation,
