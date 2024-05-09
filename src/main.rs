@@ -187,7 +187,7 @@
 
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Select, Sender};
-use eframe::egui::{CentralPanel, ComboBox};
+use eframe::egui::{CentralPanel, ComboBox, Id, SidePanel};
 use engine::{Engine, EngineService, EngineServiceEvent, EngineServiceInput};
 use ensnare::prelude::*;
 use std::{
@@ -405,11 +405,7 @@ impl eframe::App for ActorSystemApp {
                 AppServiceEvent::MidiOutputsRefreshed(ports) => self.midi_output_ports = ports,
             }
         }
-        CentralPanel::default().show(ctx, |ui| {
-            if let Some(engine) = self.engine.as_ref() {
-                engine.lock().unwrap().ui(ui);
-            }
-            ui.separator();
+        SidePanel::right(Id::new("right-panel")).show(ctx, |ui| {
             ui.heading("MIDI");
             if !self.midi_input_ports.is_empty()
                 && ComboBox::new(ui.next_auto_id(), "MIDI Input")
@@ -441,6 +437,11 @@ impl eframe::App for ActorSystemApp {
                     .send_input(AppServiceInput::MidiOutputPortSelected(
                         self.midi_output_ports[self.midi_output_selected].clone(),
                     ))
+            }
+        });
+        CentralPanel::default().show(ctx, |ui| {
+            if let Some(engine) = self.engine.as_ref() {
+                engine.lock().unwrap().ui(ui);
             }
         });
         ctx.request_repaint_after(Duration::from_millis(100));
