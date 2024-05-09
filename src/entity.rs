@@ -1,5 +1,8 @@
 use crate::{
-    midi::MidiAction, subscription::Subscription, traits::ProvidesActorService, ATOMIC_ORDERING,
+    actions::{AudioAction, ControlAction, MidiAction},
+    subscription::Subscription,
+    traits::ProvidesActorService,
+    ATOMIC_ORDERING,
 };
 use crossbeam_channel::{Select, Sender};
 use ensnare::prelude::*;
@@ -10,10 +13,10 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub enum EntityRequest {
-    /// Connect a receiver to this entity's action output.
-    ActionSubscribe(Sender<EntityAction>),
-    /// Disconnect a receiver from this entity's action output.
-    ActionUnsubscribe(Sender<EntityAction>),
+    /// Connect a receiver to this entity's audio output.
+    ActionSubscribe(Sender<AudioAction>),
+    /// Disconnect a receiver from this entity's audio output.
+    ActionUnsubscribe(Sender<AudioAction>),
     /// Connect a MIDI receiver to this entity's MIDI output.
     MidiSubscribe(Sender<MidiAction>),
     /// Disconnect a MIDI receiver from this entity's MIDI output.
@@ -48,29 +51,13 @@ pub enum EntityRequest {
     Quit,
 }
 
-#[derive(Debug, Clone)]
-pub enum EntityAction {
-    /// The entity has produced a buffer of audio.
-    Frames(Vec<StereoSample>),
-    /// The entity has transformed a buffer of audio.
-    Transformed(Vec<StereoSample>),
-}
-
-/// The entity's signal has changed.
-#[derive(Debug, Clone)]
-pub struct ControlAction {
-    pub(crate) source_uid: Uid,
-    pub(crate) value: ControlValue,
-}
-
 #[derive(Debug)]
 pub struct EntityActor {
     /// Incoming requests to this entity.
     request_channel_pair: ChannelPair<EntityRequest>,
 
-    /// If this entity subscribes to other entities, then it receives those
-    /// actions on this channel.
-    action_channel_pair: ChannelPair<EntityAction>,
+    /// This entity's audio subscriptions (actions from other entities).
+    audio_channel_pair: ChannelPair<AudioAction>,
 
     /// Control receiver channel.
     control_channel_pair: ChannelPair<ControlAction>,
@@ -93,7 +80,7 @@ impl EntityActor {
     pub(crate) fn new_with_wrapped(uid: Uid, entity: Arc<Mutex<dyn EntityBounds>>) -> Self {
         let r = Self {
             request_channel_pair: Default::default(),
-            action_channel_pair: Default::default(),
+            audio_channel_pair: Default::default(),
             control_channel_pair: Default::default(),
             uid,
             entity,
@@ -105,15 +92,16 @@ impl EntityActor {
 
     fn start_input_thread(&self) {
         let request_receiver = self.request_channel_pair.receiver.clone();
-        let mut action_subscription: Subscription<EntityAction> = Default::default();
+        let mut audio_subscription: Subscription<AudioAction> = Default::default();
         let mut midi_subscription: Subscription<MidiAction> = Default::default();
         let mut control_subscription: Subscription<ControlAction> = Default::default();
         let mut source_uid_to_control_indexes: HashMap<Uid, Vec<ControlIndex>> = Default::default();
         let entity = Arc::clone(&self.entity);
         let mut buffer = GenerationBuffer::<StereoSample>::default();
         let is_sound_active = Arc::clone(&self.is_sound_active);
-        let action_receiver = self.action_channel_pair.receiver.clone();
+        let action_receiver = self.audio_channel_pair.receiver.clone();
         let control_receiver = self.control_channel_pair.receiver.clone();
+        let uid = self.uid;
 
         std::thread::spawn(move || {
             let midi_channel_pair: ChannelPair<MidiAction> = Default::default();
@@ -151,9 +139,10 @@ impl EntityActor {
                                     let is_active =
                                         entity.lock().unwrap().generate(buffer.buffer_mut());
                                     is_sound_active.store(is_active, ATOMIC_ORDERING);
-                                    action_subscription.broadcast_mut(EntityAction::Frames(
-                                        buffer.buffer().to_vec(),
-                                    ));
+                                    audio_subscription.broadcast_mut(AudioAction {
+                                        source_uid: uid,
+                                        frames: buffer.buffer().into(),
+                                    });
                                 }
                                 EntityRequest::Quit => {
                                     break;
@@ -163,13 +152,13 @@ impl EntityActor {
                                     buffer.resize(count);
                                     buffer.buffer_mut().copy_from_slice(&frames);
                                     entity.lock().unwrap().transform(buffer.buffer_mut());
-                                    action_subscription.broadcast_mut(EntityAction::Transformed(
-                                        buffer.buffer().to_vec(),
-                                    ));
+                                    audio_subscription.broadcast_mut(AudioAction {
+                                        source_uid: uid,
+                                        frames: buffer.buffer().into(),
+                                    });
                                 }
                                 EntityRequest::Work(time_range) => {
                                     if let Ok(mut entity) = entity.lock() {
-                                        let uid = entity.uid();
                                         entity.update_time_range(&time_range);
                                         entity.work(&mut |event| match event {
                                             WorkEvent::Midi(channel, message) => {
@@ -194,10 +183,10 @@ impl EntityActor {
                                     }
                                 }
                                 EntityRequest::ActionSubscribe(sender) => {
-                                    action_subscription.subscribe(&sender);
+                                    audio_subscription.subscribe(&sender);
                                 }
                                 EntityRequest::ActionUnsubscribe(sender) => {
-                                    action_subscription.unsubscribe(&sender);
+                                    audio_subscription.unsubscribe(&sender);
                                 }
                                 EntityRequest::MidiSubscribe(sender) => {
                                     midi_subscription.subscribe(&sender)
@@ -228,11 +217,8 @@ impl EntityActor {
                         }
                     }
                     index if index == action_index => {
-                        if let Ok(action) = Self::recv_operation(operation, &action_receiver) {
-                            match action {
-                                EntityAction::Frames(_) => panic!("this shouldn't happen"),
-                                EntityAction::Transformed(_) => panic!("this shouldn't happen"),
-                            }
+                        if let Ok(_action) = Self::recv_operation(operation, &action_receiver) {
+                            panic!("this shouldn't happen")
                         }
                     }
                     index if index == midi_index => {
@@ -301,13 +287,13 @@ impl EntityActor {
     }
 }
 
-impl ProvidesActorService<EntityRequest, EntityAction> for EntityActor {
+impl ProvidesActorService<EntityRequest, AudioAction> for EntityActor {
     fn sender(&self) -> &Sender<EntityRequest> {
         &self.request_channel_pair.sender
     }
 
-    fn action_sender(&self) -> &Sender<EntityAction> {
-        &self.action_channel_pair.sender
+    fn action_sender(&self) -> &Sender<AudioAction> {
+        &self.audio_channel_pair.sender
     }
 }
 impl Displays for EntityActor {

@@ -196,13 +196,13 @@ use std::{
 };
 use traits::ProvidesService;
 
+mod actions;
 mod always;
 mod arp;
 mod busy;
 mod drone;
 mod engine;
 mod entity;
-mod midi;
 mod mixer;
 mod quietener;
 mod subscription;

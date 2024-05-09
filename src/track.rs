@@ -1,10 +1,10 @@
 use crate::{
+    actions::{AudioAction, ControlAction, MidiAction},
     always::AlwaysSame,
     arp::Arpeggiator,
     busy::BusyWaiter,
     drone::DroneController,
-    entity::{ControlAction, EntityAction, EntityActor, EntityRequest},
-    midi::MidiAction,
+    entity::{EntityActor, EntityRequest},
     mixer::Mixer,
     quietener::Quietener,
     subscription::Subscription,
@@ -54,204 +54,6 @@ pub enum TrackAction {
 }
 
 #[derive(Debug)]
-struct TrackActorStateMachine {
-    track_uid: TrackUid,
-    is_master_track: bool,
-    state: TrackActorState,
-    buffer: GenerationBuffer<StereoSample>,
-    track: Arc<Mutex<Track>>,
-    subscription: Subscription<TrackAction>,
-}
-impl TrackActorStateMachine {
-    fn new_with(track: &Arc<Mutex<Track>>) -> Self {
-        let (track_uid, is_master_track) = {
-            let track = track.lock().unwrap();
-            (track.uid, track.is_master_track)
-        };
-
-        Self {
-            track_uid,
-            is_master_track,
-            state: Default::default(),
-            buffer: Default::default(),
-            track: Arc::clone(track),
-            subscription: Default::default(),
-        }
-    }
-
-    fn handle_entity_action(&mut self, action: EntityAction) {
-        match action {
-            EntityAction::Frames(frames) => {
-                self.handle_incoming_frames(frames);
-            }
-            EntityAction::Transformed(frames) => {
-                self.handle_incoming_frames(frames);
-            }
-        }
-    }
-
-    fn handle_midi_action(&mut self, action: MidiAction) {
-        self.subscription
-            .broadcast_mut(TrackAction::Midi(action.channel, action.message));
-        // TODO: opportunity to use direct channels?
-        if let Ok(track) = self.track.lock() {
-            for actor in track
-                .actors
-                .values()
-                .filter(|&a| a.uid() != action.source_uid)
-            {
-                actor.send(EntityRequest::Midi(action.channel, action.message));
-            }
-        }
-    }
-
-    fn handle_track_action(&mut self, action: TrackAction) {
-        match action {
-            TrackAction::Midi(channel, message) => {
-                self.subscription
-                    .broadcast_mut(TrackAction::Midi(channel, message));
-            }
-            TrackAction::Frames(track_uid, frames) => {
-                if self.track.lock().unwrap().mixer.is_some() {
-                    self.handle_incoming_track_frames(track_uid, frames);
-                } else {
-                    self.handle_incoming_frames(frames);
-                }
-            }
-        }
-    }
-
-    fn handle_incoming_frames(&mut self, frames: Vec<StereoSample>) {
-        assert!(frames.len() <= 64);
-        match &self.state {
-            TrackActorState::Idle => panic!("We got frames when we weren't expecting any"),
-            TrackActorState::AwaitingSources(_) => {
-                // We got some audio from someone. Mix it into the track buffer.
-                self.buffer.merge(&frames);
-                self.advance_state_awaiting_sources();
-            }
-            TrackActorState::AwaitingEffect(_) => {
-                // An effect completed processing. Copy its results over the
-                // current buffer.
-                self.buffer.buffer_mut().copy_from_slice(&frames);
-                self.advance_state_awaiting_effect();
-            }
-        }
-    }
-
-    fn handle_incoming_track_frames(&mut self, track_uid: TrackUid, frames: Vec<StereoSample>) {
-        assert!(frames.len() <= 64);
-        assert!(matches!(self.state, TrackActorState::AwaitingSources(..)));
-        assert!(self.is_master_track);
-
-        if let Ok(track) = self.track.lock() {
-            if let Some(mixer) = track.mixer.as_ref() {
-                mixer.mix(track_uid, &frames, self.buffer.buffer_mut());
-            }
-        }
-        self.advance_state_awaiting_sources();
-    }
-
-    fn advance_state_awaiting_sources(&mut self) {
-        match &self.state {
-            TrackActorState::Idle => panic!("invalid starting state"),
-            TrackActorState::AwaitingSources(count) => {
-                // We got a frame. See if we've gotten all the ones we expect.
-                if *count == 1 {
-                    // We have. Now it's time to let the effects process what we
-                    // have.
-                    if let Ok(track) = self.track.lock() {
-                        self.state = TrackActorState::AwaitingEffect(VecDeque::from(
-                            track.ordered_actor_uids.clone(),
-                        ));
-                    }
-                    self.advance_state_awaiting_effect();
-                } else {
-                    self.state = TrackActorState::AwaitingSources(count - 1);
-                }
-            }
-            TrackActorState::AwaitingEffect(_) => {
-                panic!("invalid state")
-            }
-        }
-    }
-
-    fn advance_state_awaiting_effect(&mut self) {
-        if let TrackActorState::AwaitingEffect(uids) = &mut self.state {
-            if let Some(uid) = uids.pop_front() {
-                if let Ok(track) = self.track.lock() {
-                    if let Some(actor) = track.actors.get(&uid) {
-                        actor.send_request(EntityRequest::NeedsTransformation(
-                            self.buffer.buffer().to_vec(),
-                        ));
-                    }
-                }
-            } else {
-                // We're out of effects. Send what we have!
-                self.issue_outgoing_frames_action();
-            }
-        } else {
-            panic!("wrong state: {:?}", self.state);
-        }
-    }
-
-    fn issue_outgoing_frames_action(&mut self) {
-        self.state = TrackActorState::Idle;
-        self.subscription.broadcast_mut(TrackAction::Frames(
-            self.track_uid,
-            self.buffer.buffer().to_vec(),
-        ));
-    }
-
-    fn handle_needs_audio(&mut self, count: usize) {
-        assert!(
-            matches!(self.state, TrackActorState::Idle),
-            "{}: expected a clean slate",
-            self.track.lock().unwrap().uid
-        );
-        self.buffer.resize(count);
-        self.buffer.clear();
-
-        // if we have source tracks, start them. Same for instruments.
-        let mut have_nonzero_sources = false;
-        if let Ok(track) = self.track.lock() {
-            let new_sources_count = track.send_tracks.len() + track.actors.len();
-            self.state = TrackActorState::AwaitingSources(new_sources_count);
-            for source in track.send_tracks.values() {
-                let _ = source.try_send(TrackRequest::NeedsAudio(count));
-            }
-            for actor in track.actors.values() {
-                actor.send(EntityRequest::NeedsAudio(count));
-            }
-            have_nonzero_sources = new_sources_count != 0;
-        }
-
-        // Did we have any sources in the first place?
-        if !have_nonzero_sources {
-            self.issue_outgoing_frames_action();
-        } else {
-            // Nothing to do now but wait for incoming Frames from our sources
-        }
-    }
-
-    fn handle_subscribe(&mut self, sender: Sender<TrackAction>) {
-        self.subscription.subscribe(&sender);
-    }
-
-    fn handle_unsubscribe(&mut self, sender: Sender<TrackAction>) {
-        self.subscription.unsubscribe(&sender);
-    }
-}
-
-#[derive(Default, Debug)]
-enum TrackActorState {
-    #[default]
-    Idle,
-    AwaitingSources(usize),
-    AwaitingEffect(VecDeque<Uid>),
-}
-
-#[derive(Debug)]
 pub struct TrackActor {
     /// Receives requests.
     request_channel_pair: ChannelPair<TrackRequest>,
@@ -281,11 +83,11 @@ impl TrackActor {
         is_master_track: bool,
         uid_factory: &Arc<EntityUidFactory>,
     ) -> Self {
-        let entity_action_channel_pair: ChannelPair<EntityAction> = Default::default();
+        let audio_action_channel_pair: ChannelPair<AudioAction> = Default::default();
         let midi_action_channel_pair: ChannelPair<MidiAction> = Default::default();
         let control_action_channel_pair: ChannelPair<ControlAction> = Default::default();
         let action_subscription_senders = ActionSubscriptionSenders {
-            entity: entity_action_channel_pair.sender.clone(),
+            audio: audio_action_channel_pair.sender.clone(),
             midi: midi_action_channel_pair.sender.clone(),
             control: control_action_channel_pair.sender.clone(),
         };
@@ -303,7 +105,7 @@ impl TrackActor {
         };
 
         r.start_thread(
-            entity_action_channel_pair,
+            audio_action_channel_pair,
             midi_action_channel_pair,
             control_action_channel_pair,
         );
@@ -313,24 +115,24 @@ impl TrackActor {
 
     fn start_thread(
         &mut self,
-        entity_action_channel_pair: ChannelPair<EntityAction>,
+        audio_action_channel_pair: ChannelPair<AudioAction>,
         midi_action_channel_pair: ChannelPair<MidiAction>,
         control_action_channel_pair: ChannelPair<ControlAction>,
     ) {
         let input_receiver = self.request_channel_pair.receiver.clone();
         let track = Arc::clone(&self.inner);
         let track_receiver = self.track_action_channel_pair.receiver.clone();
-        let mut state_machine = TrackActorStateMachine::new_with(&self.inner);
+        // let mut state_machine = TrackActorStateMachine::new_with(&self.inner);
 
         std::thread::spawn(move || {
             let mut sel = Select::default();
 
-            let entity_receiver = entity_action_channel_pair.receiver.clone();
+            let audio_receiver = audio_action_channel_pair.receiver.clone();
             let midi_receiver = midi_action_channel_pair.receiver.clone();
             let control_receiver = control_action_channel_pair.receiver.clone();
 
             let input_index = sel.recv(&input_receiver);
-            let entity_index = sel.recv(&entity_receiver);
+            let audio_index = sel.recv(&audio_receiver);
             let midi_index = sel.recv(&midi_receiver);
             let control_index = sel.recv(&control_receiver);
             let track_index = sel.recv(&track_receiver);
@@ -349,7 +151,7 @@ impl TrackActor {
                                     }
                                 }
                                 TrackRequest::NeedsAudio(count) => {
-                                    state_machine.handle_needs_audio(count);
+                                    track.lock().unwrap().handle_needs_audio(count);
                                 }
                                 TrackRequest::Quit => {
                                     if let Ok(mut track) = track.lock() {
@@ -380,22 +182,22 @@ impl TrackActor {
                                     }
                                 }
                                 TrackRequest::Subscribe(sender) => {
-                                    state_machine.handle_subscribe(sender)
+                                    track.lock().unwrap().handle_subscribe(sender)
                                 }
                                 TrackRequest::Unsubscribe(sender) => {
-                                    state_machine.handle_unsubscribe(sender)
+                                    track.lock().unwrap().handle_unsubscribe(sender)
                                 }
                             }
                         }
                     }
-                    index if index == entity_index => {
-                        if let Ok(action) = Self::recv_operation(operation, &entity_receiver) {
-                            state_machine.handle_entity_action(action);
+                    index if index == audio_index => {
+                        if let Ok(action) = Self::recv_operation(operation, &audio_receiver) {
+                            track.lock().unwrap().handle_audio_action(action);
                         }
                     }
                     index if index == midi_index => {
                         if let Ok(action) = Self::recv_operation(operation, &midi_receiver) {
-                            state_machine.handle_midi_action(action)
+                            track.lock().unwrap().handle_midi_action(action)
                         }
                     }
                     index if index == control_index => {
@@ -405,7 +207,7 @@ impl TrackActor {
                     }
                     index if index == track_index => {
                         if let Ok(action) = Self::recv_operation(operation, &track_receiver) {
-                            state_machine.handle_track_action(action);
+                            track.lock().unwrap().handle_track_action(action);
                         }
                     }
                     _ => {
@@ -426,9 +228,17 @@ struct ControllableItem {
 
 #[derive(Debug)]
 struct ActionSubscriptionSenders {
-    entity: Sender<EntityAction>,
+    audio: Sender<AudioAction>,
     midi: Sender<MidiAction>,
     control: Sender<ControlAction>,
+}
+
+#[derive(Default, Debug)]
+enum TrackState {
+    #[default]
+    Idle,
+    AwaitingSources(usize),
+    AwaitingEffect(VecDeque<Uid>),
 }
 
 #[derive(Debug)]
@@ -448,6 +258,10 @@ struct Track {
     mixer: Option<Mixer>,
 
     actor_subscription_senders: ActionSubscriptionSenders,
+
+    state: TrackState,
+    buffer: GenerationBuffer<StereoSample>,
+    subscription: Subscription<TrackAction>,
 }
 impl Track {
     fn new_with(
@@ -476,6 +290,10 @@ impl Track {
                 None
             },
             actor_subscription_senders,
+
+            state: Default::default(),
+            buffer: Default::default(),
+            subscription: Default::default(),
         }
     }
 
@@ -488,7 +306,7 @@ impl Track {
     fn add_actor(&mut self, actor: EntityActor) {
         let uid = actor.uid();
         actor.send_request(EntityRequest::ActionSubscribe(
-            self.actor_subscription_senders.entity.clone(),
+            self.actor_subscription_senders.audio.clone(),
         ));
         actor.send_request(EntityRequest::MidiSubscribe(
             self.actor_subscription_senders.midi.clone(),
@@ -520,7 +338,7 @@ impl Track {
         if let Some(actor) = self.actors.get(&uid) {
             self.entity_request_subscription.unsubscribe(actor.sender());
             actor.send_request(EntityRequest::ActionUnsubscribe(
-                self.actor_subscription_senders.entity.clone(),
+                self.actor_subscription_senders.audio.clone(),
             ));
             actor.send_request(EntityRequest::MidiUnsubscribe(
                 self.actor_subscription_senders.midi.clone(),
@@ -570,6 +388,147 @@ impl Track {
                     links.retain(|link| link.uid != target_uid && link.param != index);
                 }
             }
+        }
+    }
+
+    fn handle_subscribe(&mut self, sender: Sender<TrackAction>) {
+        self.subscription.subscribe(&sender);
+    }
+
+    fn handle_unsubscribe(&mut self, sender: Sender<TrackAction>) {
+        self.subscription.unsubscribe(&sender);
+    }
+
+    fn handle_audio_action(&mut self, action: AudioAction) {
+        self.handle_incoming_frames(action.frames);
+    }
+
+    fn handle_midi_action(&mut self, action: MidiAction) {
+        self.subscription
+            .broadcast_mut(TrackAction::Midi(action.channel, action.message));
+        // TODO: opportunity to use direct channels?
+        for actor in self
+            .actors
+            .values()
+            .filter(|&a| a.uid() != action.source_uid)
+        {
+            actor.send(EntityRequest::Midi(action.channel, action.message));
+        }
+    }
+
+    fn handle_track_action(&mut self, action: TrackAction) {
+        match action {
+            TrackAction::Midi(channel, message) => {
+                self.subscription
+                    .broadcast_mut(TrackAction::Midi(channel, message));
+            }
+            TrackAction::Frames(track_uid, frames) => {
+                if self.mixer.is_some() {
+                    self.handle_incoming_track_frames(track_uid, frames);
+                } else {
+                    self.handle_incoming_frames(frames);
+                }
+            }
+        }
+    }
+
+    fn handle_incoming_frames(&mut self, frames: Vec<StereoSample>) {
+        assert!(frames.len() <= 64);
+        match &self.state {
+            TrackState::Idle => panic!("We got frames when we weren't expecting any"),
+            TrackState::AwaitingSources(_) => {
+                // We got some audio from someone. Mix it into the track buffer.
+                self.buffer.merge(&frames);
+                self.advance_state_awaiting_sources();
+            }
+            TrackState::AwaitingEffect(_) => {
+                // An effect completed processing. Copy its results over the
+                // current buffer.
+                self.buffer.buffer_mut().copy_from_slice(&frames);
+                self.advance_state_awaiting_effect();
+            }
+        }
+    }
+
+    fn handle_incoming_track_frames(&mut self, track_uid: TrackUid, frames: Vec<StereoSample>) {
+        assert!(frames.len() <= 64);
+        assert!(matches!(self.state, TrackState::AwaitingSources(..)));
+        assert!(self.is_master_track);
+
+        if let Some(mixer) = self.mixer.as_ref() {
+            mixer.mix(track_uid, &frames, self.buffer.buffer_mut());
+        }
+        self.advance_state_awaiting_sources();
+    }
+
+    fn advance_state_awaiting_sources(&mut self) {
+        match &self.state {
+            TrackState::Idle => panic!("invalid starting state"),
+            TrackState::AwaitingSources(count) => {
+                // We got a frame. See if we've gotten all the ones we expect.
+                if *count == 1 {
+                    // We have. Now it's time to let the effects process what we
+                    // have.
+                    self.state =
+                        TrackState::AwaitingEffect(VecDeque::from(self.ordered_actor_uids.clone()));
+                    self.advance_state_awaiting_effect();
+                } else {
+                    self.state = TrackState::AwaitingSources(count - 1);
+                }
+            }
+            TrackState::AwaitingEffect(_) => {
+                panic!("invalid state")
+            }
+        }
+    }
+
+    fn advance_state_awaiting_effect(&mut self) {
+        if let TrackState::AwaitingEffect(uids) = &mut self.state {
+            if let Some(uid) = uids.pop_front() {
+                if let Some(actor) = self.actors.get(&uid) {
+                    actor.send_request(EntityRequest::NeedsTransformation(
+                        self.buffer.buffer().to_vec(),
+                    ));
+                }
+            } else {
+                // We're out of effects. Send what we have!
+                self.issue_outgoing_frames_action();
+            }
+        } else {
+            panic!("wrong state: {:?}", self.state);
+        }
+    }
+
+    fn issue_outgoing_frames_action(&mut self) {
+        self.state = TrackState::Idle;
+        self.subscription
+            .broadcast_mut(TrackAction::Frames(self.uid, self.buffer.buffer().into()));
+    }
+
+    fn handle_needs_audio(&mut self, count: usize) {
+        assert!(
+            matches!(self.state, TrackState::Idle),
+            "{}: expected a clean slate",
+            self.uid
+        );
+        self.buffer.resize(count);
+        self.buffer.clear();
+
+        // if we have source tracks, start them. Same for instruments.
+        let new_sources_count = self.send_tracks.len() + self.actors.len();
+        self.state = TrackState::AwaitingSources(new_sources_count);
+        for source in self.send_tracks.values() {
+            let _ = source.try_send(TrackRequest::NeedsAudio(count));
+        }
+        for actor in self.actors.values() {
+            actor.send(EntityRequest::NeedsAudio(count));
+        }
+
+        // Did we have any sources in the first place?
+        if new_sources_count == 0 {
+            self.issue_outgoing_frames_action();
+        } else {
+            // Nothing to do now but wait for incoming Frames from our sources
         }
     }
 }
