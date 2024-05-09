@@ -253,7 +253,7 @@ impl HandlesMidi for Engine {
         _midi_messages_fn: &mut MidiMessagesFn,
     ) {
         self.track_subscription
-            .broadcast(TrackRequest::Midi(channel, message));
+            .broadcast_mut(TrackRequest::Midi(channel, message));
     }
 
     fn midi_note_label_metadata(&self) -> Option<MidiNoteLabelMetadata> {
@@ -275,7 +275,7 @@ impl Controls for Engine {
 
     fn stop(&mut self) {
         self.transport.stop();
-        self.track_subscription.broadcast(TrackRequest::Midi(
+        self.track_subscription.broadcast_mut(TrackRequest::Midi(
             MidiChannel::default(),
             MidiMessage::Controller {
                 controller: 123.into(),
@@ -317,7 +317,7 @@ impl Engine {
 
         // Ask tracks to do their time-based work.
         self.track_subscription
-            .broadcast(TrackRequest::Work(time_range));
+            .broadcast_mut(TrackRequest::Work(time_range));
 
         // Ask master track for next buffer of frames.
         self.master_track
@@ -360,7 +360,7 @@ impl Engine {
     }
 
     fn request_quit(&mut self) {
-        self.track_subscription.broadcast(TrackRequest::Quit);
+        self.track_subscription.broadcast_mut(TrackRequest::Quit);
     }
 }
 impl Displays for Engine {

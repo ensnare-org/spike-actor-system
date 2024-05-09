@@ -92,7 +92,7 @@ impl TrackActorStateMachine {
 
     fn handle_midi_action(&mut self, action: MidiAction) {
         self.subscription
-            .broadcast(TrackAction::Midi(action.channel, action.message));
+            .broadcast_mut(TrackAction::Midi(action.channel, action.message));
         // TODO: opportunity to use direct channels?
         if let Ok(track) = self.track.lock() {
             for actor in track
@@ -109,7 +109,7 @@ impl TrackActorStateMachine {
         match action {
             TrackAction::Midi(channel, message) => {
                 self.subscription
-                    .broadcast(TrackAction::Midi(channel, message));
+                    .broadcast_mut(TrackAction::Midi(channel, message));
             }
             TrackAction::Frames(track_uid, frames) => {
                 if self.track.lock().unwrap().mixer.is_some() {
@@ -197,7 +197,7 @@ impl TrackActorStateMachine {
 
     fn issue_outgoing_frames_action(&mut self) {
         self.state = TrackActorState::Idle;
-        self.subscription.broadcast(TrackAction::Frames(
+        self.subscription.broadcast_mut(TrackAction::Frames(
             self.track_uid,
             self.buffer.buffer().to_vec(),
         ));
@@ -342,28 +342,28 @@ impl TrackActor {
                         if let Ok(request) = Self::recv_operation(operation, &input_receiver) {
                             match request {
                                 TrackRequest::Midi(channel, message) => {
-                                    if let Ok(track) = track.lock() {
+                                    if let Ok(mut track) = track.lock() {
                                         track
                                             .entity_request_subscription
-                                            .broadcast(EntityRequest::Midi(channel, message));
+                                            .broadcast_mut(EntityRequest::Midi(channel, message));
                                     }
                                 }
                                 TrackRequest::NeedsAudio(count) => {
                                     state_machine.handle_needs_audio(count);
                                 }
                                 TrackRequest::Quit => {
-                                    if let Ok(track) = track.lock() {
+                                    if let Ok(mut track) = track.lock() {
                                         track
                                             .entity_request_subscription
-                                            .broadcast(EntityRequest::Quit);
+                                            .broadcast_mut(EntityRequest::Quit);
                                     }
                                     break;
                                 }
                                 TrackRequest::Work(time_range) => {
-                                    if let Ok(track) = track.lock() {
+                                    if let Ok(mut track) = track.lock() {
                                         track
                                             .entity_request_subscription
-                                            .broadcast(EntityRequest::Work(time_range.clone()));
+                                            .broadcast_mut(EntityRequest::Work(time_range.clone()));
                                     }
                                 }
                                 TrackRequest::AddSend(uid, sender) => {

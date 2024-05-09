@@ -136,7 +136,7 @@ impl EntityActor {
                                         &entity,
                                         channel,
                                         message,
-                                        &midi_subscription,
+                                        &mut midi_subscription,
                                     );
                                 }
                                 EntityRequest::Control(index, value) => {
@@ -151,8 +151,9 @@ impl EntityActor {
                                     let is_active =
                                         entity.lock().unwrap().generate(buffer.buffer_mut());
                                     is_sound_active.store(is_active, ATOMIC_ORDERING);
-                                    action_subscription
-                                        .broadcast(EntityAction::Frames(buffer.buffer().to_vec()));
+                                    action_subscription.broadcast_mut(EntityAction::Frames(
+                                        buffer.buffer().to_vec(),
+                                    ));
                                 }
                                 EntityRequest::Quit => {
                                     break;
@@ -162,7 +163,7 @@ impl EntityActor {
                                     buffer.resize(count);
                                     buffer.buffer_mut().copy_from_slice(&frames);
                                     entity.lock().unwrap().transform(buffer.buffer_mut());
-                                    action_subscription.broadcast(EntityAction::Transformed(
+                                    action_subscription.broadcast_mut(EntityAction::Transformed(
                                         buffer.buffer().to_vec(),
                                     ));
                                 }
@@ -172,7 +173,7 @@ impl EntityActor {
                                         entity.update_time_range(&time_range);
                                         entity.work(&mut |event| match event {
                                             WorkEvent::Midi(channel, message) => {
-                                                midi_subscription.broadcast(MidiAction {
+                                                midi_subscription.broadcast_mut(MidiAction {
                                                     source_uid: uid,
                                                     channel,
                                                     message,
@@ -184,7 +185,7 @@ impl EntityActor {
                                                 )
                                             }
                                             WorkEvent::Control(value) => {
-                                                control_subscription.broadcast(ControlAction {
+                                                control_subscription.broadcast_mut(ControlAction {
                                                     source_uid: uid,
                                                     value,
                                                 });
@@ -240,7 +241,7 @@ impl EntityActor {
                                 &entity,
                                 action.channel,
                                 action.message,
-                                &midi_subscription,
+                                &mut midi_subscription,
                             )
                         }
                     }
@@ -281,12 +282,12 @@ impl EntityActor {
         entity: &Arc<Mutex<dyn EntityBounds>>,
         channel: MidiChannel,
         message: MidiMessage,
-        subscription: &Subscription<MidiAction>,
+        subscription: &mut Subscription<MidiAction>,
     ) {
         if let Ok(mut entity) = entity.lock() {
             let uid = entity.uid();
             entity.handle_midi_message(channel, message, &mut |c, m| {
-                subscription.broadcast(MidiAction {
+                subscription.broadcast_mut(MidiAction {
                     source_uid: uid,
                     channel: c,
                     message: m,

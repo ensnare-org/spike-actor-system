@@ -20,6 +20,7 @@ impl<A: Clone> Subscription<A> {
         self.subscribers.retain(|s| !s.same_channel(sender));
     }
 
+    /// Broadcasts to all subscribers, ignoring errors.
     pub fn broadcast(&self, action: A) {
         for sender in self.subscribers.iter() {
             let r = sender.try_send(action.clone());
@@ -27,5 +28,12 @@ impl<A: Clone> Subscription<A> {
                 eprintln!("Subscription: while broadcasting: {e:?}");
             }
         }
+    }
+
+    /// Broadcasts to all subscribers, removing any that fail to send
+    /// successfully.
+    pub fn broadcast_mut(&mut self, action: A) {
+        self.subscribers
+            .retain(|sender| sender.try_send(action.clone()).is_ok());
     }
 }
