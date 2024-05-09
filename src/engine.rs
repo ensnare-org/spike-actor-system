@@ -19,18 +19,12 @@ use std::{
 /// Communication from the client to [EngineService].
 #[derive(Debug)]
 pub enum EngineServiceInput {
-    /// The audio interface's configuration changed.
-    Reset(SampleRate, u16, AudioQueue),
-    /// The midi interface received a MIDI message.
+    /// The configuration changed.
+    Configure(SampleRate, u16, AudioQueue),
+    /// An external MIDI message arrived.
     Midi(MidiChannel, MidiMessage),
-    /// The audio interface needs more audio.
-    NeedsAudio(usize),
-    #[allow(dead_code)]
-    /// Start playing.
-    Play,
-    #[allow(dead_code)]
-    /// Stop playing.
-    Stop,
+    /// The AudioQueue needs more audio.
+    AudioQueueNeedsAudio(usize),
     /// The client would like the service to exit.
     Quit,
 }
@@ -114,7 +108,7 @@ impl EngineService {
                         if let Ok(input) = Self::recv_operation(operation, &service_input_receiver)
                         {
                             match input {
-                                EngineServiceInput::Reset(
+                                EngineServiceInput::Configure(
                                     sample_rate,
                                     channel_count,
                                     new_audio_queue,
@@ -134,7 +128,7 @@ impl EngineService {
                                     .lock()
                                     .unwrap()
                                     .handle_midi_message(channel, message, &mut |_, _| panic!("This MIDI message should have been sent via channel, not callback.")),
-                                EngineServiceInput::NeedsAudio(count) => {
+                                EngineServiceInput::AudioQueueNeedsAudio(count) => {
                                     if frames_requested == 0 {
                                         start_generation = true;
                                     }
@@ -145,8 +139,6 @@ impl EngineService {
                                     writer_service.send_input(WavWriterInput::Quit);
                                     break;
                                 }
-                                EngineServiceInput::Play => engine.lock().unwrap().play(),
-                                EngineServiceInput::Stop => engine.lock().unwrap().stop(),
                             }
                         }
                     }

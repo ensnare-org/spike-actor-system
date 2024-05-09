@@ -1,4 +1,6 @@
-use crate::{subscription::Subscription, traits::ProvidesActorService, ATOMIC_ORDERING};
+use crate::{
+    midi::MidiAction, subscription::Subscription, traits::ProvidesActorService, ATOMIC_ORDERING,
+};
 use crossbeam_channel::{Select, Sender};
 use ensnare::prelude::*;
 use std::{
@@ -25,14 +27,14 @@ pub enum EntityRequest {
     /// Unlink this entity's controllable parameter from the specified source entity.
     ControlLinkRemove(Uid, ControlIndex),
     /// The entity should handle this message (if it listens on this channel).
-    /// As with [EntityRequest::Work], it can produce [EntityAction::Midi]
-    /// and/or [EntityAction::Control].
+    /// As with [EntityRequest::Work], it can produce [MidiAction] and/or
+    /// [ControlAction].
     Midi(MidiChannel, MidiMessage),
     /// The entity should adjust the given control as specified.
     Control(ControlIndex, ControlValue),
     /// The entity should perform work for the given slice of time. During this
-    /// time slice, it can produce any number of [EntityAction::Midi] and/or
-    /// [EntityAction::Control].
+    /// time slice, it can produce any number of [MidiAction] and/or
+    /// [ControlAction].
     Work(TimeRange),
     /// The entity should produce the specified number of frames of audio via
     /// [EntityAction::Frames]. If it doesn't produce audio, it should produce a
@@ -52,14 +54,6 @@ pub enum EntityAction {
     Frames(Vec<StereoSample>),
     /// The entity has transformed a buffer of audio.
     Transformed(Vec<StereoSample>),
-}
-
-/// The entity has emitted a MIDI message.
-#[derive(Debug, Clone)]
-pub struct MidiAction {
-    pub(crate) source_uid: Uid,
-    pub(crate) channel: MidiChannel,
-    pub(crate) message: MidiMessage,
 }
 
 /// The entity's signal has changed.

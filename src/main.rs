@@ -92,7 +92,8 @@
 //!   do something or informs it that something happened.
 //! - Event: A message broadcast by a service to its client(s) saying that
 //!   something happened.
-//! - Request: A message sent from an actor's owner to ask the actor to do something.
+//! - Request: A message sent from an actor's owner to ask the actor to do
+//!   something.
 //! - Action: A message sent by an actor to inform its owner of completed work.
 //!
 //! - Want master track output
@@ -102,6 +103,87 @@
 //! - A single source is a track or an instrument.
 //! - An instrument has no dependencies.
 //! - A track's dependencies is described above.
+//!
+//! Updated flow of information
+//! ===========================
+//!
+//! Entity Publications
+//!   - EntityAction (tell downstream recipients that we produced something)
+//!   - MidiAction (tell recipients that we produced a message)
+//!   - ControlAction (tell recipients that our signal changed) Entity
+//!
+//! Subscriptions
+//!   - EntityAction (receive someone's output to process)
+//!   - MidiAction (handle an incoming MIDI message)
+//!   - ControlAction (act on someone's signal change)
+//!
+//! Track Publications
+//!   - TrackAction (we produced something)
+//!   - MidiAction (we are forwarding a MIDI message from one of the entities
+//!     we're subscribed to)
+//!   - ControlAction <------- why?
+//!
+//! Track Subscriptions
+//!   - TrackAction (we are an aux track with someone sending to us)
+//!   - EntityAction (we want to mix their signals)
+//!   - MidiAction (we might want to forward an entity's MIDI message)
+//!   - ControlAction <------- not sure
+//!
+//! Engine Publications
+//!   - TrackAction (actually no -- we send our output straight to AudioQueue
+//!     and WavWriter)
+//!   - MidiAction (send MIDI to external interface)
+//!   - ControlAction (NO, definitely not)
+//!
+//! The Engine is also service (Inputs and Events).
+//!
+//! A typical setup:
+//! - Three tracks
+//! - 1 and 2 are standard tracks, 3 is an aux
+//! - 1 has Instrument I, Effect E
+//! - 2 has Controller C, Instrument J, Effects F & G
+//! - 3 has Track 1, Effect H
+//! - Master track has Mixer with standard gain/pan per track
+//! - Engine has an AudioQueue
+//!
+//! Configuration:
+//! - Engine subscribes to Master track's TrackAction and MidiAction. Engine
+//!   forwards all TrackAction to AudioQueue, and all MidiAction to
+//!   MidiInterface
+//! - Master track subscribes to
+//!     - Mixer's TrackAction
+//!     - Each track's MidiAction
+//! - Mixer subscribes to
+//!     - Each track's TrackAction
+//! - Track 1 subscribes to
+//!     - Embedded sequencer S1's MidiAction
+//!     - Effect E's TrackAction
+//! - Track 1 can send inputs to
+//!     - Sequencer S1
+//!     - Instrument I, Effect E
+//! - Instrument 1 is subscribed to S1's MidiAction
+//! - Effect E is subscribed to I1's TrackAction
+//!
+//! ......... hmmmm. Maybe this is actually all subscriptions, not inputs. For
+//! example, maybe instead of saying NeedsAudio, Engine can simply publish that
+//! there is a need for 64 frames of audio.
+//! - Engine publishes Needs 64
+//! - Master track subscribes to it, and publishes Needs64 to all its tracks
+//! - Each track publishes Needs64 to the *last* effect
+//! - Each effect publishes Needs64 upstream until it hits the track mixer,
+//!   which publishes it.
+//! - Each source is subscribed to the mixer, so it receives that, acts on it,
+//!   and publishes Produced64
+//! - Track mixer subscribed to all sources, so it gets each Produced64, mixes
+//!   it, and publishes it
+//! - That trickes down the effects chain
+//! - Track receives Produced64, forwards it
+//! - Master track receives each one and mixes it, then Produced64 to Engine,
+//!   which pushes into AudioQueue
+//! - Maybe Needs64 can be a broadcast signal that puts everyone into a
+//!   producing or ready state. That way we don't get the wasteful crawl
+//!   backward up the signal chain.
+//!
 
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Select, Sender};
@@ -120,6 +202,7 @@ mod busy;
 mod drone;
 mod engine;
 mod entity;
+mod midi;
 mod mixer;
 mod quietener;
 mod subscription;
@@ -216,7 +299,9 @@ impl AppServiceManager {
                 let operation = sel.select();
                 match operation.index() {
                     index if index == service_manager_index => {
-                        if let Ok(input) = Self::recv_operation(operation, &service_manager_receiver) {
+                        if let Ok(input) =
+                            Self::recv_operation(operation, &service_manager_receiver)
+                        {
                             match input {
                                 AppServiceInput::Quit => {
                                     println!("ServiceInput::Quit");
@@ -245,7 +330,7 @@ impl AppServiceManager {
                                     new_channels,
                                     new_audio_queue,
                                 ) => {
-                                    let _ = engine_sender.try_send(EngineServiceInput::Reset(
+                                    let _ = engine_sender.try_send(EngineServiceInput::Configure(
                                         new_sample_rate,
                                         new_channels,
                                         new_audio_queue,
@@ -253,7 +338,7 @@ impl AppServiceManager {
                                 }
                                 AudioServiceEvent::NeedsAudio(count) => {
                                     let _ = engine_sender
-                                        .try_send(EngineServiceInput::NeedsAudio(count));
+                                        .try_send(EngineServiceInput::AudioQueueNeedsAudio(count));
                                 }
                                 AudioServiceEvent::Underrun => eprintln!("FYI underrun"),
                             }
