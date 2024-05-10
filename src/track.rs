@@ -524,7 +524,7 @@ impl Track {
 impl Displays for Track {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
         let response = if self.is_master_track {
-            ui.heading(format!("Master Track"))
+            ui.heading("Master Track")
         } else {
             ui.heading(format!("Track {}", self.uid))
         };

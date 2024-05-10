@@ -61,7 +61,7 @@ impl Displays for Mixer {
         ui.horizontal_top(|ui| {
             let mut needs_level_recalc = false;
             for track_uid in self.track_uids.iter() {
-                if let Some(param_set) = self.track_param_sets.get_mut(&track_uid) {
+                if let Some(param_set) = self.track_param_sets.get_mut(track_uid) {
                     Frame::default()
                         .stroke(Stroke::new(0.2, Color32::YELLOW))
                         .show(ui, |ui| {
