@@ -10,9 +10,9 @@ crossbeam-queue = "0.3.11"
 delegate = "0.12.0"
 derivative = "2.2.0"
 eframe = "0.27.2"
-ensnare = { path = "../../../src/ensnare" }
-ensnare-proc-macros = { path = "../../../src/ensnare/proc-macros" }
-ensnare-toys = { path = "../../../src/ensnare/toys" }
+ensnare = { path = "../ensnare" }
+ensnare-proc-macros = { path = "../ensnare/proc-macros" }
+ensnare-toys = { path = "../ensnare/toys" }
 env_logger = "0.11.3"
 hound = "3.5.1"
 rustc-hash = "1.1.0"

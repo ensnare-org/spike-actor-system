@@ -254,7 +254,9 @@ impl eframe::App for ActorSystemApp {
         });
         CentralPanel::default().show(ctx, |ui| {
             if let Some(engine) = self.engine.as_ref() {
-                engine.lock().unwrap().ui(ui);
+                if let Ok(mut engine) = engine.lock() {
+                    engine.ui(ui);
+                }
             }
         });
         ctx.request_repaint_after(Duration::from_millis(100));
