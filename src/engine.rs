@@ -2,15 +2,12 @@ use crate::{
     actions::{AudioAction, MidiAction},
     subscription::Subscription,
     track::{TrackActor, TrackRequest},
-    traits::{ProvidesActorService, ProvidesService},
+    traits::ProvidesActorService,
     wav_writer::{WavWriterInput, WavWriterService},
 };
 use crossbeam_channel::{Select, Sender};
-use crossbeam_queue::ArrayQueue;
 use delegate::delegate;
-use ensnare::{
-    orchestration::TrackUidFactory, prelude::*, traits::MidiNoteLabelMetadata, types::AudioQueue,
-};
+use ensnare::{orchestration::TrackUidFactory, prelude::*, traits::MidiNoteLabelMetadata};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -20,8 +17,10 @@ use std::{
 /// Communication from the client to [EngineService].
 #[derive(Debug)]
 pub enum EngineServiceInput {
+    /// The engine should send frames to this audio service.
+    SetAudioSender(Sender<AudioServiceInput>),
     /// The configuration changed.
-    Configure(SampleRate, u16, AudioQueue),
+    Configure(SampleRate, u8),
     /// An external MIDI message arrived.
     Midi(MidiChannel, MidiMessage),
     /// The AudioQueue needs more audio.
@@ -92,7 +91,6 @@ impl EngineService {
             .sender
             .try_send(EngineServiceEvent::Reset(Arc::clone(&self.engine)));
         let service_input_receiver = self.input_channel_pair.receiver.clone();
-        let mut audio_queue: Option<Arc<ArrayQueue<StereoSample>>> = None;
 
         let writer_service = WavWriterService::new();
 
@@ -107,6 +105,8 @@ impl EngineService {
             let audio_index = sel.recv(&audio_action_receiver);
             let midi_index = sel.recv(&midi_action_receiver);
 
+            let mut audio_sender = None;
+
             loop {
                 let operation = sel.select();
                 let mut start_generation = false;
@@ -118,9 +118,7 @@ impl EngineService {
                                 EngineServiceInput::Configure(
                                     sample_rate,
                                     channel_count,
-                                    new_audio_queue,
                                 ) => {
-                                    audio_queue = Some(new_audio_queue);
                                     engine.lock().unwrap().update_sample_rate(sample_rate);
                                     writer_service.send_input(WavWriterInput::Reset(
                                         PathBuf::from(format!(
@@ -146,6 +144,7 @@ impl EngineService {
                                     writer_service.send_input(WavWriterInput::Quit);
                                     break;
                                 }
+                                EngineServiceInput::SetAudioSender(sender) => audio_sender = Some(sender),
                             }
                         }
                     }
@@ -155,17 +154,10 @@ impl EngineService {
                             let frames_len = action.frames.len();
                             assert!(frames_len <= 64);
 
-                            if let Some(queue) = audio_queue.as_ref() {
-                                for &frame in action.frames.iter() {
-                                    if queue.force_push(frame).is_some() {
-                                        eprintln!(
-                                            "FYI force_push queue len/cap {}/{}, frames {}",
-                                            queue.len(),
-                                            queue.capacity(),
-                                            frames_requested
-                                        );
-                                    }
-                                }
+                            if let Some(audio_sender) = audio_sender.as_ref() {
+                                let wrapped_buffer = Arc::new(action.frames.clone());
+                                let _ = audio_sender
+                                    .try_send(AudioServiceInput::Frames(wrapped_buffer));
                             }
                             writer_service.send_input(WavWriterInput::Frames(action.frames));
 

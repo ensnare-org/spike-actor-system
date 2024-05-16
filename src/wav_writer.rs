@@ -1,11 +1,10 @@
-use crate::traits::ProvidesService;
 use anyhow::anyhow;
 use ensnare::prelude::*;
 use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum WavWriterInput {
-    Reset(PathBuf, SampleRate, u16),
+    Reset(PathBuf, SampleRate, u8),
     Frames(Vec<StereoSample>),
     Quit,
 }
@@ -52,7 +51,7 @@ impl WavWriterService {
                         match hound::WavWriter::create(
                             path_buf.as_os_str(),
                             hound::WavSpec {
-                                channels: new_channel_count,
+                                channels: new_channel_count as u16,
                                 sample_rate: new_sample_rate.0 as u32,
                                 bits_per_sample: 32,
                                 sample_format: hound::SampleFormat::Float,

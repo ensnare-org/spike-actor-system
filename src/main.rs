@@ -3,11 +3,11 @@ use crossbeam_channel::{Receiver, Select, Sender};
 use eframe::egui::{CentralPanel, ComboBox, Id, SidePanel};
 use engine::{Engine, EngineService, EngineServiceEvent, EngineServiceInput};
 use ensnare::prelude::*;
+use ensnare::services::ProvidesService;
 use std::{
     sync::{atomic::Ordering, Arc, Mutex, RwLock},
     time::Duration,
 };
-use traits::ProvidesService;
 
 mod actions;
 mod always;
@@ -48,6 +48,10 @@ struct AppServiceManager {
 
     // reason = "We need to keep a reference to the service or else it'll be dropped"
     #[allow(dead_code)]
+    audio_service: AudioService,
+
+    // reason = "We need to keep a reference to the service or else it'll be dropped"
+    #[allow(dead_code)]
     midi_service: MidiService,
     // reason = "We need to keep a reference to the service or else it'll be dropped"
     #[allow(dead_code)]
@@ -69,6 +73,7 @@ impl AppServiceManager {
     pub fn new() -> Self {
         let midi_settings = Arc::new(RwLock::new(MidiSettings::default()));
         let r = Self {
+            audio_service: AudioService::default(),
             midi_service: MidiService::new_with(&midi_settings),
             engine_service: EngineService::default(),
             input_channel_pair: Default::default(),
@@ -93,17 +98,17 @@ impl AppServiceManager {
         let service_manager_receiver = self.input_channel_pair.receiver.clone();
         let service_manager_sender = self.event_channel_pair.sender.clone();
 
+        let audio_receiver = self.audio_service.receiver().clone();
+        let audio_sender = self.audio_service.sender().clone();
+
+        let _ = engine_sender.try_send(EngineServiceInput::SetAudioSender(
+            self.audio_service.sender().clone(),
+        ));
+
         std::thread::spawn(move || {
             let mut sel = Select::new();
 
-            // AudioService is special because it isn't Send, so we have to
-            // create it on the same thread that we use to communicate with it.
-            // See https://github.com/RustAudio/cpal/issues/818.
-            let audio_service = AudioService::default();
-            let audio_receiver = audio_service.receiver().clone();
-            let audio_sender = audio_service.sender().clone();
             let audio_index = sel.recv(&audio_receiver);
-
             let service_manager_index = sel.recv(&service_manager_receiver);
             let midi_index = sel.recv(&midi_receiver);
             let engine_index = sel.recv(&engine_receiver);
@@ -138,18 +143,13 @@ impl AppServiceManager {
                     index if index == audio_index => {
                         if let Ok(event) = Self::recv_operation(operation, &audio_receiver) {
                             match event {
-                                AudioServiceEvent::Reset(
-                                    new_sample_rate,
-                                    new_channels,
-                                    new_audio_queue,
-                                ) => {
+                                AudioServiceEvent::Reset(new_sample_rate, new_channels) => {
                                     let _ = engine_sender.try_send(EngineServiceInput::Configure(
                                         new_sample_rate,
                                         new_channels,
-                                        new_audio_queue,
                                     ));
                                 }
-                                AudioServiceEvent::NeedsAudio(count) => {
+                                AudioServiceEvent::FramesNeeded(count) => {
                                     let _ = engine_sender
                                         .try_send(EngineServiceInput::AudioQueueNeedsAudio(count));
                                 }
