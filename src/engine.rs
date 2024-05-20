@@ -40,11 +40,10 @@ pub enum EngineServiceEvent {
 
 #[derive(Debug)]
 pub struct EngineService {
-    input_channel_pair: ChannelPair<EngineServiceInput>,
-    event_channel_pair: ChannelPair<EngineServiceEvent>,
-    audio_action_channel_pair: ChannelPair<AudioAction>,
-    midi_action_channel_pair: ChannelPair<MidiAction>,
-
+    inputs: CrossbeamChannel<EngineServiceInput>,
+    events: CrossbeamChannel<EngineServiceEvent>,
+    audio_actions: CrossbeamChannel<AudioAction>,
+    midi_actions: CrossbeamChannel<MidiAction>,
     engine: Arc<Mutex<Engine>>,
 }
 impl Default for EngineService {
@@ -54,27 +53,27 @@ impl Default for EngineService {
 }
 impl ProvidesService<EngineServiceInput, EngineServiceEvent> for EngineService {
     fn receiver(&self) -> &crossbeam_channel::Receiver<EngineServiceEvent> {
-        &self.event_channel_pair.receiver
+        &self.events.receiver
     }
 
     fn sender(&self) -> &Sender<EngineServiceInput> {
-        &self.input_channel_pair.sender
+        &self.inputs.sender
     }
 }
 impl EngineService {
     pub fn new() -> Self {
-        let audio_action_channel_pair: ChannelPair<AudioAction> = Default::default();
-        let midi_action_channel_pair: ChannelPair<MidiAction> = Default::default();
+        let audio_action_channel_pair: CrossbeamChannel<AudioAction> = Default::default();
+        let midi_action_channel_pair: CrossbeamChannel<MidiAction> = Default::default();
         let mut engine = Engine::new();
         engine.subscribe_audio(&audio_action_channel_pair.sender);
         engine.subscribe_midi(&midi_action_channel_pair.sender);
 
         let r = Self {
             engine: Arc::new(Mutex::new(engine)),
-            input_channel_pair: Default::default(),
-            event_channel_pair: Default::default(),
-            audio_action_channel_pair,
-            midi_action_channel_pair,
+            inputs: Default::default(),
+            events: Default::default(),
+            audio_actions: audio_action_channel_pair,
+            midi_actions: midi_action_channel_pair,
         };
 
         r.start_thread();
@@ -83,21 +82,21 @@ impl EngineService {
     }
 
     fn start_thread(&self) {
-        let service_event_sender = self.event_channel_pair.sender.clone();
+        let service_event_sender = self.events.sender.clone();
 
         let engine = Arc::clone(&self.engine);
         let _ = self
-            .event_channel_pair
+            .events
             .sender
             .try_send(EngineServiceEvent::Reset(Arc::clone(&self.engine)));
-        let service_input_receiver = self.input_channel_pair.receiver.clone();
+        let service_input_receiver = self.inputs.receiver.clone();
 
         let writer_service = WavWriterService::new();
 
         let mut frames_requested = 0;
 
-        let audio_action_receiver = self.audio_action_channel_pair.receiver.clone();
-        let midi_action_receiver = self.midi_action_channel_pair.receiver.clone();
+        let audio_action_receiver = self.audio_actions.receiver.clone();
+        let midi_action_receiver = self.midi_actions.receiver.clone();
 
         std::thread::spawn(move || {
             let mut sel = Select::default();
@@ -368,13 +367,14 @@ impl Engine {
 }
 impl Displays for Engine {
     fn ui(&mut self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
-        ui.horizontal_top(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Play").clicked() {
                 self.play();
             }
             if ui.button("Stop").clicked() {
                 self.stop();
             }
+            ui.end_row();
             if ui.button("Add track").clicked() {
                 let _ = self.create_track();
             }

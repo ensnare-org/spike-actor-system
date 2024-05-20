@@ -54,13 +54,13 @@ pub enum EntityRequest {
 #[derive(Debug)]
 pub struct EntityActor {
     /// Incoming requests to this entity.
-    request_channel_pair: ChannelPair<EntityRequest>,
+    requests: CrossbeamChannel<EntityRequest>,
 
     /// This entity's audio subscriptions (actions from other entities).
-    audio_channel_pair: ChannelPair<AudioAction>,
+    audio_actions: CrossbeamChannel<AudioAction>,
 
     /// Control receiver channel.
-    control_channel_pair: ChannelPair<ControlAction>,
+    control_actions: CrossbeamChannel<ControlAction>,
 
     /// A cached copy of entity's [Uid].
     uid: Uid,
@@ -79,9 +79,9 @@ impl EntityActor {
 
     pub(crate) fn new_with_wrapped(uid: Uid, entity: Arc<Mutex<dyn EntityBounds>>) -> Self {
         let r = Self {
-            request_channel_pair: Default::default(),
-            audio_channel_pair: Default::default(),
-            control_channel_pair: Default::default(),
+            requests: Default::default(),
+            audio_actions: Default::default(),
+            control_actions: Default::default(),
             uid,
             entity,
             is_sound_active: Default::default(),
@@ -91,7 +91,7 @@ impl EntityActor {
     }
 
     fn start_input_thread(&self) {
-        let request_receiver = self.request_channel_pair.receiver.clone();
+        let request_receiver = self.requests.receiver.clone();
         let mut audio_subscription: Subscription<AudioAction> = Default::default();
         let mut midi_subscription: Subscription<MidiAction> = Default::default();
         let mut control_subscription: Subscription<ControlAction> = Default::default();
@@ -99,12 +99,12 @@ impl EntityActor {
         let entity = Arc::clone(&self.entity);
         let mut buffer = GenerationBuffer::<StereoSample>::default();
         let is_sound_active = Arc::clone(&self.is_sound_active);
-        let action_receiver = self.audio_channel_pair.receiver.clone();
-        let control_receiver = self.control_channel_pair.receiver.clone();
+        let action_receiver = self.audio_actions.receiver.clone();
+        let control_receiver = self.control_actions.receiver.clone();
         let uid = self.uid;
 
         std::thread::spawn(move || {
-            let midi_channel_pair: ChannelPair<MidiAction> = Default::default();
+            let midi_channel_pair: CrossbeamChannel<MidiAction> = Default::default();
             let midi_receiver = midi_channel_pair.receiver.clone();
 
             let mut sel = Select::default();
@@ -253,7 +253,7 @@ impl EntityActor {
     }
 
     pub(crate) fn send(&self, msg: EntityRequest) {
-        let _ = self.request_channel_pair.sender.try_send(msg);
+        let _ = self.requests.sender.try_send(msg);
     }
 
     pub(crate) fn uid(&self) -> Uid {
@@ -283,13 +283,13 @@ impl EntityActor {
     }
 
     pub(crate) fn control_sender(&self) -> &Sender<ControlAction> {
-        &self.control_channel_pair.sender
+        &self.control_actions.sender
     }
 }
 
 impl ProvidesActorService<EntityRequest, AudioAction> for EntityActor {
     fn sender(&self) -> &Sender<EntityRequest> {
-        &self.request_channel_pair.sender
+        &self.requests.sender
     }
 }
 impl Displays for EntityActor {

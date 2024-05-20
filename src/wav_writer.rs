@@ -16,8 +16,8 @@ pub enum WavWriterEvent {
 
 #[derive(Debug)]
 pub struct WavWriterService {
-    input_channel_pair: ChannelPair<WavWriterInput>,
-    event_channel_pair: ChannelPair<WavWriterEvent>,
+    inputs: CrossbeamChannel<WavWriterInput>,
+    events: CrossbeamChannel<WavWriterEvent>,
 }
 impl Default for WavWriterService {
     fn default() -> Self {
@@ -27,8 +27,8 @@ impl Default for WavWriterService {
 impl WavWriterService {
     pub fn new() -> Self {
         let r = Self {
-            input_channel_pair: Default::default(),
-            event_channel_pair: Default::default(),
+            inputs: Default::default(),
+            events: Default::default(),
         };
 
         r.start_thread();
@@ -36,8 +36,8 @@ impl WavWriterService {
     }
 
     fn start_thread(&self) {
-        let receiver = self.input_channel_pair.receiver.clone();
-        let sender = self.event_channel_pair.sender.clone();
+        let receiver = self.inputs.receiver.clone();
+        let sender = self.events.sender.clone();
         let mut writer = None;
 
         // Nice touch: don't write to the file until our first non-silent sample.
@@ -95,10 +95,10 @@ impl WavWriterService {
 }
 impl ProvidesService<WavWriterInput, WavWriterEvent> for WavWriterService {
     fn receiver(&self) -> &crossbeam_channel::Receiver<WavWriterEvent> {
-        &self.event_channel_pair.receiver
+        &self.events.receiver
     }
 
     fn sender(&self) -> &crossbeam_channel::Sender<WavWriterInput> {
-        &self.input_channel_pair.sender
+        &self.inputs.sender
     }
 }

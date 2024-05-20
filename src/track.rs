@@ -49,13 +49,13 @@ pub enum TrackRequest {
 #[derive(Debug)]
 pub struct TrackActor {
     /// Receives requests.
-    request_channel_pair: ChannelPair<TrackRequest>,
+    requests: CrossbeamChannel<TrackRequest>,
 
     /// Receives audio actions.
-    audio_action_channel_pair: ChannelPair<AudioAction>,
+    audio_actions: CrossbeamChannel<AudioAction>,
 
     /// Receives MIDI actions.
-    midi_action_channel_pair: ChannelPair<MidiAction>,
+    midi_actions: CrossbeamChannel<MidiAction>,
 
     inner: Arc<Mutex<Track>>,
 }
@@ -66,7 +66,7 @@ impl Displays for TrackActor {
 }
 impl ProvidesActorService<TrackRequest, AudioAction> for TrackActor {
     fn sender(&self) -> &Sender<TrackRequest> {
-        &self.request_channel_pair.sender
+        &self.requests.sender
     }
 }
 impl TrackActor {
@@ -77,9 +77,9 @@ impl TrackActor {
     ) -> Self {
         // These three channel pairs are for actions we want to receive from
         // downstream (entities and child tracks).
-        let audio_action_channel_pair: ChannelPair<AudioAction> = Default::default();
-        let midi_action_channel_pair: ChannelPair<MidiAction> = Default::default();
-        let control_action_channel_pair: ChannelPair<ControlAction> = Default::default();
+        let audio_action_channel_pair: CrossbeamChannel<AudioAction> = Default::default();
+        let midi_action_channel_pair: CrossbeamChannel<MidiAction> = Default::default();
+        let control_action_channel_pair: CrossbeamChannel<ControlAction> = Default::default();
 
         let audio_receiver = audio_action_channel_pair.receiver.clone();
         let midi_receiver = midi_action_channel_pair.receiver.clone();
@@ -100,9 +100,9 @@ impl TrackActor {
             uid_factory,
         );
         let mut r = Self {
-            request_channel_pair: Default::default(),
-            audio_action_channel_pair,
-            midi_action_channel_pair,
+            requests: Default::default(),
+            audio_actions: audio_action_channel_pair,
+            midi_actions: midi_action_channel_pair,
             inner: Arc::new(Mutex::new(track)),
         };
 
@@ -117,7 +117,7 @@ impl TrackActor {
         midi_receiver: Receiver<MidiAction>,
         control_receiver: Receiver<ControlAction>,
     ) {
-        let input_receiver = self.request_channel_pair.receiver.clone();
+        let input_receiver = self.requests.receiver.clone();
         let track = Arc::clone(&self.inner);
 
         std::thread::spawn(move || {
@@ -215,11 +215,11 @@ impl TrackActor {
     }
 
     pub(crate) fn audio_sender(&self) -> &Sender<AudioAction> {
-        &self.audio_action_channel_pair.sender
+        &self.audio_actions.sender
     }
 
     pub(crate) fn midi_sender(&self) -> &Sender<MidiAction> {
-        &self.midi_action_channel_pair.sender
+        &self.midi_actions.sender
     }
 }
 

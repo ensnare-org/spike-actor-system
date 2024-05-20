@@ -43,8 +43,8 @@ enum AppServiceEvent {
 /// Manages all the services that the app uses.
 #[derive(Debug)]
 struct AppServiceManager {
-    input_channel_pair: ChannelPair<AppServiceInput>,
-    event_channel_pair: ChannelPair<AppServiceEvent>,
+    inputs: CrossbeamChannel<AppServiceInput>,
+    events: CrossbeamChannel<AppServiceEvent>,
 
     // reason = "We need to keep a reference to the service or else it'll be dropped"
     #[allow(dead_code)]
@@ -62,22 +62,23 @@ struct AppServiceManager {
 }
 impl ProvidesService<AppServiceInput, AppServiceEvent> for AppServiceManager {
     fn receiver(&self) -> &Receiver<AppServiceEvent> {
-        &self.event_channel_pair.receiver
+        &self.events.receiver
     }
 
     fn sender(&self) -> &Sender<AppServiceInput> {
-        &self.input_channel_pair.sender
+        &self.inputs.sender
     }
 }
 impl AppServiceManager {
     pub fn new() -> Self {
         let midi_settings = Arc::new(RwLock::new(MidiSettings::default()));
+        let audio_service = AudioService::default();
         let r = Self {
-            audio_service: AudioService::default(),
+            audio_service,
             midi_service: MidiService::new_with(&midi_settings),
             engine_service: EngineService::default(),
-            input_channel_pair: Default::default(),
-            event_channel_pair: Default::default(),
+            inputs: Default::default(),
+            events: Default::default(),
             midi_settings,
         };
         r.start_thread();
@@ -95,8 +96,8 @@ impl AppServiceManager {
         // is the set of channels that the app uses to talk with the service
         // manager, rather than being channels that the service manager uses to
         // aggregate other services.
-        let service_manager_receiver = self.input_channel_pair.receiver.clone();
-        let service_manager_sender = self.event_channel_pair.sender.clone();
+        let service_manager_receiver = self.inputs.receiver.clone();
+        let service_manager_sender = self.events.sender.clone();
 
         let audio_receiver = self.audio_service.receiver().clone();
         let audio_sender = self.audio_service.sender().clone();
