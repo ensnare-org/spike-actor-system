@@ -12,6 +12,7 @@ derivative = "2.2.0"
 eframe = "0.27.2"
 ensnare = { path = "../ensnare" }
 ensnare-proc-macros = { path = "../ensnare/proc-macros" }
+ensnare-services = { version = "0.0.2", features = ["audio"] }
 ensnare-toys = { path = "../ensnare/toys" }
 env_logger = "0.11.3"
 hound = "3.5.1"

@@ -1,5 +1,6 @@
 use anyhow::anyhow;
 use ensnare::prelude::*;
+use ensnare_services::prelude::*;
 use std::path::PathBuf;
 
 #[derive(Debug)]

@@ -3,7 +3,7 @@ use crossbeam_channel::{Receiver, Select, Sender};
 use eframe::egui::{CentralPanel, ComboBox, Id, SidePanel};
 use engine::{Engine, EngineService, EngineServiceEvent, EngineServiceInput};
 use ensnare::prelude::*;
-use ensnare::services::ProvidesService;
+use ensnare_services::prelude::*;
 use std::{
     sync::{atomic::Ordering, Arc, Mutex, RwLock},
     time::Duration,
@@ -48,7 +48,7 @@ struct AppServiceManager {
 
     // reason = "We need to keep a reference to the service or else it'll be dropped"
     #[allow(dead_code)]
-    audio_service: AudioService,
+    audio_service: CpalAudioService,
 
     // reason = "We need to keep a reference to the service or else it'll be dropped"
     #[allow(dead_code)]
@@ -72,7 +72,7 @@ impl ProvidesService<AppServiceInput, AppServiceEvent> for AppServiceManager {
 impl AppServiceManager {
     pub fn new() -> Self {
         let midi_settings = Arc::new(RwLock::new(MidiSettings::default()));
-        let audio_service = AudioService::default();
+        let audio_service = CpalAudioService::default();
         let r = Self {
             audio_service,
             midi_service: MidiService::new_with(&midi_settings),
@@ -124,7 +124,7 @@ impl AppServiceManager {
                             match input {
                                 AppServiceInput::Quit => {
                                     println!("ServiceInput::Quit");
-                                    let _ = audio_sender.try_send(AudioServiceInput::Quit);
+                                    let _ = audio_sender.try_send(CpalAudioServiceInput::Quit);
                                     let _ = midi_sender.try_send(MidiInterfaceServiceInput::Quit);
                                     let _ = engine_sender.try_send(EngineServiceInput::Quit);
                                     break;
@@ -144,17 +144,17 @@ impl AppServiceManager {
                     index if index == audio_index => {
                         if let Ok(event) = Self::recv_operation(operation, &audio_receiver) {
                             match event {
-                                AudioServiceEvent::Reset(new_sample_rate, new_channels) => {
+                                CpalAudioServiceEvent::Reset(new_sample_rate, new_channels) => {
                                     let _ = engine_sender.try_send(EngineServiceInput::Configure(
-                                        new_sample_rate,
+                                        SampleRate(new_sample_rate),
                                         new_channels,
                                     ));
                                 }
-                                AudioServiceEvent::FramesNeeded(count) => {
+                                CpalAudioServiceEvent::FramesNeeded(count) => {
                                     let _ = engine_sender
                                         .try_send(EngineServiceInput::AudioQueueNeedsAudio(count));
                                 }
-                                AudioServiceEvent::Underrun => eprintln!("FYI underrun"),
+                                CpalAudioServiceEvent::Underrun => eprintln!("FYI underrun"),
                             }
                         }
                     }

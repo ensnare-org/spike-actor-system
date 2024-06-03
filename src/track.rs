@@ -14,6 +14,7 @@ use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Select, Sender};
 use eframe::egui::{ComboBox, Frame, Margin};
 use ensnare::prelude::*;
+use ensnare_services::CrossbeamChannel;
 use ensnare_toys::{ToyInstrument, ToySynth};
 use std::{
     collections::{HashMap, VecDeque},

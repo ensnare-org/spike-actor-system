@@ -8,6 +8,7 @@ use crate::{
 use crossbeam_channel::{Select, Sender};
 use delegate::delegate;
 use ensnare::{orchestration::TrackUidFactory, prelude::*, traits::MidiNoteLabelMetadata};
+use ensnare_services::prelude::*;
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -18,7 +19,7 @@ use std::{
 #[derive(Debug)]
 pub enum EngineServiceInput {
     /// The engine should send frames to this audio service.
-    SetAudioSender(Sender<AudioServiceInput>),
+    SetAudioSender(Sender<CpalAudioServiceInput>),
     /// The configuration changed.
     Configure(SampleRate, u8),
     /// An external MIDI message arrived.
@@ -154,9 +155,15 @@ impl EngineService {
                             assert!(frames_len <= 64);
 
                             if let Some(audio_sender) = audio_sender.as_ref() {
-                                let wrapped_buffer = Arc::new(action.frames.clone());
+                                let wrapped_buffer = Arc::new(
+                                    action
+                                        .frames
+                                        .iter()
+                                        .map(|s| (s.0 .0 as f32, s.1 .0 as f32))
+                                        .collect(),
+                                );
                                 let _ = audio_sender
-                                    .try_send(AudioServiceInput::Frames(wrapped_buffer));
+                                    .try_send(CpalAudioServiceInput::Frames(wrapped_buffer));
                             }
                             writer_service.send_input(WavWriterInput::Frames(action.frames));
 

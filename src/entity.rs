@@ -6,6 +6,7 @@ use crate::{
 };
 use crossbeam_channel::{Select, Sender};
 use ensnare::prelude::*;
+use ensnare_services::CrossbeamChannel;
 use std::{
     collections::HashMap,
     sync::{atomic::AtomicBool, Arc, Mutex},
