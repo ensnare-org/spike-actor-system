@@ -2,10 +2,14 @@ use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Select, Sender};
 use eframe::egui::{CentralPanel, ComboBox, Id, SidePanel};
 use engine::{Engine, EngineService, EngineServiceEvent, EngineServiceInput};
-use ensnare::prelude::*;
+use ensnare::{
+    prelude::*,
+    traits::ProvidesService,
+    types::{CrossbeamChannel, MidiPortDescriptor},
+};
 use ensnare_services::prelude::*;
 use std::{
-    sync::{atomic::Ordering, Arc, Mutex, RwLock},
+    sync::{atomic::Ordering, Arc, Mutex},
     time::Duration,
 };
 
@@ -56,9 +60,6 @@ struct AppServiceManager {
     // reason = "We need to keep a reference to the service or else it'll be dropped"
     #[allow(dead_code)]
     engine_service: EngineService,
-
-    #[allow(dead_code)]
-    midi_settings: Arc<RwLock<MidiSettings>>,
 }
 impl ProvidesService<AppServiceInput, AppServiceEvent> for AppServiceManager {
     fn receiver(&self) -> &Receiver<AppServiceEvent> {
@@ -71,15 +72,13 @@ impl ProvidesService<AppServiceInput, AppServiceEvent> for AppServiceManager {
 }
 impl AppServiceManager {
     pub fn new() -> Self {
-        let midi_settings = Arc::new(RwLock::new(MidiSettings::default()));
         let audio_service = CpalAudioService::default();
         let r = Self {
             audio_service,
-            midi_service: MidiService::new_with(&midi_settings),
+            midi_service: MidiService::default(),
             engine_service: EngineService::default(),
             inputs: Default::default(),
             events: Default::default(),
-            midi_settings,
         };
         r.start_thread();
         r
@@ -125,18 +124,17 @@ impl AppServiceManager {
                                 AppServiceInput::Quit => {
                                     println!("ServiceInput::Quit");
                                     let _ = audio_sender.try_send(CpalAudioServiceInput::Quit);
-                                    let _ = midi_sender.try_send(MidiInterfaceServiceInput::Quit);
+                                    let _ = midi_sender.try_send(MidiServiceInput::Quit);
                                     let _ = engine_sender.try_send(EngineServiceInput::Quit);
                                     break;
                                 }
                                 AppServiceInput::MidiInputPortSelected(port) => {
                                     let _ = midi_sender
-                                        .try_send(MidiInterfaceServiceInput::SelectMidiInput(port));
+                                        .try_send(MidiServiceInput::SelectMidiInput(port));
                                 }
                                 AppServiceInput::MidiOutputPortSelected(port) => {
-                                    let _ = midi_sender.try_send(
-                                        MidiInterfaceServiceInput::SelectMidiOutput(port),
-                                    );
+                                    let _ = midi_sender
+                                        .try_send(MidiServiceInput::SelectMidiOutput(port));
                                 }
                             }
                         }
@@ -168,14 +166,17 @@ impl AppServiceManager {
                                 MidiServiceEvent::MidiOut => {
                                     // TODO: blink activity.... (or get rid of this, because we sent it so we already know about it....)
                                 }
-                                MidiServiceEvent::InputPortsRefreshed(ports) => {
+                                MidiServiceEvent::InputPorts(ports) => {
                                     let _ = service_manager_sender
                                         .try_send(AppServiceEvent::MidiInputsRefreshed(ports));
                                 }
-                                MidiServiceEvent::OutputPortsRefreshed(ports) => {
+                                MidiServiceEvent::OutputPorts(ports) => {
                                     let _ = service_manager_sender
                                         .try_send(AppServiceEvent::MidiOutputsRefreshed(ports));
                                 }
+                                MidiServiceEvent::InputPortSelected(_) => todo!(),
+                                MidiServiceEvent::OutputPortSelected(_) => todo!(),
+                                MidiServiceEvent::Quit => todo!(),
                             }
                         }
                     }
@@ -187,9 +188,8 @@ impl AppServiceManager {
                                         .try_send(AppServiceEvent::Reset(new_o));
                                 }
                                 EngineServiceEvent::Midi(channel, message) => {
-                                    let _ = midi_sender.try_send(MidiInterfaceServiceInput::Midi(
-                                        channel, message,
-                                    ));
+                                    let _ = midi_sender
+                                        .try_send(MidiServiceInput::Midi(channel, message));
                                 }
                             }
                         }

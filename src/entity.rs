@@ -1,3 +1,4 @@
+use ensnare_v1::prelude::*;
 use crate::{
     actions::{AudioAction, ControlAction, MidiAction},
     subscription::Subscription,
@@ -5,8 +6,7 @@ use crate::{
     ATOMIC_ORDERING,
 };
 use crossbeam_channel::{Select, Sender};
-use ensnare::prelude::*;
-use ensnare_services::CrossbeamChannel;
+use ensnare::{prelude::*, types::CrossbeamChannel};
 use std::{
     collections::HashMap,
     sync::{atomic::AtomicBool, Arc, Mutex},
@@ -67,18 +67,18 @@ pub struct EntityActor {
     uid: Uid,
 
     /// The wrapped entity.
-    pub(crate) entity: Arc<Mutex<dyn EntityBounds>>,
+    pub(crate) entity: Arc<Mutex<dyn Entity>>,
 
     /// Have we just emitted sound? Used for GUI activity indicators.
     is_sound_active: Arc<AtomicBool>,
 }
 impl EntityActor {
-    pub(crate) fn new_with(entity: impl EntityBounds + 'static) -> Self {
+    pub(crate) fn new_with(entity: impl Entity + 'static) -> Self {
         let uid = entity.uid();
         Self::new_with_wrapped(uid, Arc::new(Mutex::new(entity)))
     }
 
-    pub(crate) fn new_with_wrapped(uid: Uid, entity: Arc<Mutex<dyn EntityBounds>>) -> Self {
+    pub(crate) fn new_with_wrapped(uid: Uid, entity: Arc<Mutex<dyn Entity>>) -> Self {
         let r = Self {
             requests: Default::default(),
             audio_actions: Default::default(),
@@ -266,7 +266,7 @@ impl EntityActor {
     }
 
     fn handle_midi(
-        entity: &Arc<Mutex<dyn EntityBounds>>,
+        entity: &Arc<Mutex<dyn Entity>>,
         channel: MidiChannel,
         message: MidiMessage,
         subscription: &mut Subscription<MidiAction>,

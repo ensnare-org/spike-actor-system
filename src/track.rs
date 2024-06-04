@@ -1,3 +1,4 @@
+use ensnare_v1::prelude::*;
 use crate::{
     actions::{AudioAction, ControlAction, MidiAction},
     always::AlwaysSame,
@@ -13,8 +14,7 @@ use crate::{
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Select, Sender};
 use eframe::egui::{ComboBox, Frame, Margin};
-use ensnare::prelude::*;
-use ensnare_services::CrossbeamChannel;
+use ensnare::{prelude::*, types::CrossbeamChannel};
 use ensnare_toys::{ToyInstrument, ToySynth};
 use std::{
     collections::{HashMap, VecDeque},
@@ -304,7 +304,7 @@ impl Track {
         }
     }
 
-    fn add_entity(&mut self, mut entity: impl EntityBounds + 'static) {
+    fn add_entity(&mut self, mut entity: impl Entity + 'static) {
         entity.set_uid(self.uid_factory.mint_next());
         let actor = EntityActor::new_with(entity);
         self.add_actor(actor);

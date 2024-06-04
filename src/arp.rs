@@ -1,5 +1,5 @@
 use derivative::Derivative;
-use ensnare::prelude::*;
+use ensnare::{prelude::*, util::MidiUtils};
 use ensnare_proc_macros::{Control, IsEntity, Metadata};
 use serde::{Deserialize, Serialize};
 

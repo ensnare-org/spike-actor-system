@@ -1,5 +1,6 @@
 use ensnare::prelude::*;
 use ensnare_proc_macros::{Control, IsEntity, Metadata};
+use ensnare_v1::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, IsEntity, Control, Metadata, Serialize, Deserialize)]

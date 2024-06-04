@@ -7,7 +7,8 @@ use crate::{
 };
 use crossbeam_channel::{Select, Sender};
 use delegate::delegate;
-use ensnare::{orchestration::TrackUidFactory, prelude::*, traits::MidiNoteLabelMetadata};
+use ensnare::{orchestration::TrackUidFactory, prelude::*, traits::{MidiNoteLabelMetadata, ProvidesService}, types::CrossbeamChannel};
+use ensnare_v1::prelude::*;
 use ensnare_services::prelude::*;
 use std::{
     collections::HashMap,

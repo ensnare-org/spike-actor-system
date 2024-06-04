@@ -10,10 +10,14 @@ crossbeam-queue = "0.3.11"
 delegate = "0.12.0"
 derivative = "2.2.0"
 eframe = "0.27.2"
-ensnare = { path = "../ensnare" }
-ensnare-proc-macros = { path = "../ensnare/proc-macros" }
-ensnare-services = { version = "0.0.2", features = ["audio"] }
-ensnare-toys = { path = "../ensnare/toys" }
+ensnare = { path = "../../../../src/ensnare" }
+ensnare-proc-macros = { version = "0.0.4", path = "../../../../src/ensnare/crates/proc-macros" }
+ensnare-services = { version = "0.0.6", features = [
+    "audio",
+    "midi",
+], path = "../../../../src/ensnare/crates/services" }
+ensnare-toys = { path = "../../../../src/ensnare-v1/toys" }
+ensnare-v1 = { path = "../../../../src/ensnare-v1" }
 env_logger = "0.11.3"
 hound = "3.5.1"
 rustc-hash = "1.1.0"

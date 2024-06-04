@@ -1,5 +1,6 @@
+use ensnare_v1::prelude::*;
 use anyhow::anyhow;
-use ensnare::prelude::*;
+use ensnare::{prelude::*, traits::ProvidesService, types::CrossbeamChannel};
 use ensnare_services::prelude::*;
 use std::path::PathBuf;
 

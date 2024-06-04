@@ -1,8 +1,4 @@
-use ensnare::{
-    automation::ControlValue,
-    midi::{MidiChannel, MidiMessage},
-    types::{StereoSample, Uid},
-};
+use ensnare::prelude::*;
 
 /// The actor has produced a buffer of audio.
 #[derive(Debug, Clone)]
